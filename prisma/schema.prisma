@@ -1,0 +1,240 @@
+// Prisma schema for ForkOff API
+// Using Supabase PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// User model - synced with Supabase Auth
+model User {
+  id           String        @id @default(uuid())
+  email        String        @unique
+  name         String?
+  avatarUrl    String?
+  subscription String        @default("free") // free, pro, team
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  // Relations
+  devices      Device[]
+  projects     Project[]
+  chatSessions ChatSession[]
+
+  @@map("users")
+}
+
+// Device model - represents a connected development machine
+model Device {
+  id             String          @id @default(uuid())
+  userId         String?         // Nullable for unpaired devices
+  name           String
+  type           DeviceType
+  platform       Platform
+  status         DeviceStatus    @default(OFFLINE)
+  lastSeenAt     DateTime?
+  pairingCode    String?         @unique
+  pairingExpires DateTime?
+  hostname       String?
+  osVersion      String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  // Relations
+  user           User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connectedTools DeviceTool[]
+  projects       Project[]
+  claudeSessions ClaudeSession[]
+
+  @@index([userId])
+  @@index([pairingCode])
+  @@map("devices")
+}
+
+// Tools connected to a device (Cursor, Claude Terminal, Copilot, etc.)
+model DeviceTool {
+  id        String     @id @default(uuid())
+  deviceId  String
+  type      ToolType
+  name      String
+  version   String?
+  status    ToolStatus @default(INACTIVE)
+  config    Json?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  // Relations
+  device    Device     @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, type])
+  @@map("device_tools")
+}
+
+// Claude Code session tracking
+model ClaudeSession {
+  id             String             @id @default(uuid())
+  deviceId       String
+  sessionKey     String             // Claude's session ID from transcript path
+  directory      String             // Working directory where session was started
+  state          ClaudeSessionState @default(INACTIVE)
+  lastUsedAt     DateTime           @default(now())
+  transcriptPath String?            // Path to Claude's transcript file
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  // Relations
+  device         Device             @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, sessionKey])
+  @@index([deviceId])
+  @@map("claude_sessions")
+}
+
+enum ClaudeSessionState {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+// Project model
+model Project {
+  id           String        @id @default(uuid())
+  userId       String
+  deviceId     String
+  name         String
+  path         String
+  language     String?
+  framework    String?
+  description  String?
+  lastModified DateTime      @default(now())
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  // Relations
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device       Device        @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  chatSessions ChatSession[]
+
+  @@index([userId])
+  @@index([deviceId])
+  @@map("projects")
+}
+
+// Chat session with AI tools
+model ChatSession {
+  id            String        @id @default(uuid())
+  userId        String
+  projectId     String
+  toolType      ToolType
+  title         String        @default("New Chat")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  // Relations
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project       Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages      ChatMessage[]
+
+  @@index([userId])
+  @@index([projectId])
+  @@map("chat_sessions")
+}
+
+// Chat message
+model ChatMessage {
+  id              String          @id @default(uuid())
+  sessionId       String
+  role            MessageRole
+  content         String
+  status          MessageStatus   @default(COMPLETE)
+  timestamp       DateTime        @default(now())
+
+  // Relations
+  session         ChatSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  approvalRequest ApprovalRequest?
+
+  @@index([sessionId])
+  @@map("chat_messages")
+}
+
+// Approval request from AI tool
+model ApprovalRequest {
+  id          String              @id @default(uuid())
+  messageId   String              @unique
+  type        ApprovalType
+  description String
+  changes     Json                // Array of code changes
+  status      ApprovalStatus      @default(PENDING)
+  requestedAt DateTime            @default(now())
+  respondedAt DateTime?
+
+  // Relations
+  message     ChatMessage         @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@map("approval_requests")
+}
+
+// Enums
+enum DeviceType {
+  LAPTOP
+  DESKTOP
+  SERVER
+}
+
+enum Platform {
+  MACOS
+  WINDOWS
+  LINUX
+}
+
+enum DeviceStatus {
+  ONLINE
+  OFFLINE
+  SYNCING
+}
+
+enum ToolType {
+  CURSOR
+  CLAUDE_TERMINAL
+  CLAUDE_CODE
+  COPILOT
+  WINDSURF
+  CONTINUE
+}
+
+enum ToolStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum MessageStatus {
+  PENDING
+  STREAMING
+  COMPLETE
+  ERROR
+}
+
+enum ApprovalType {
+  FILE_CHANGE
+  FILE_CREATION
+  FILE_DELETION
+  COMMAND_EXECUTION
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
