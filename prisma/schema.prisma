@@ -77,22 +77,44 @@ model DeviceTool {
 
 // Claude Code session tracking
 model ClaudeSession {
-  id             String             @id @default(uuid())
-  deviceId       String
-  sessionKey     String             // Claude's session ID from transcript path
-  directory      String             // Working directory where session was started
-  state          ClaudeSessionState @default(INACTIVE)
-  lastUsedAt     DateTime           @default(now())
-  transcriptPath String?            // Path to Claude's transcript file
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
+  id              String                @id @default(uuid())
+  deviceId        String
+  sessionKey      String                // Our session key for routing
+  directory       String                // Working directory where session was started
+  state           ClaudeSessionState    @default(INACTIVE)
+  lastUsedAt      DateTime              @default(now())
+  transcriptPath  String?               // Path to Claude's transcript file (null for SDK streaming)
+  claudeSessionId String?               // Claude CLI's internal session ID for resume
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
 
   // Relations
-  device         Device             @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  device          Device                @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  messages        ClaudeSessionMessage[]
 
   @@unique([deviceId, sessionKey])
   @@index([deviceId])
   @@map("claude_sessions")
+}
+
+// Messages for Claude SDK streaming sessions
+model ClaudeSessionMessage {
+  id              String         @id @default(uuid())
+  sessionId       String
+  messageId       String         // Client-generated message ID for deduplication
+  type            String         // user, assistant, tool_use, tool_result, system, result
+  content         String?        // Text content
+  toolName        String?        // For tool_use/tool_result
+  toolInput       Json?          // For tool_use
+  isError         Boolean        @default(false)
+  timestamp       DateTime       @default(now())
+
+  // Relations
+  session         ClaudeSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, messageId])
+  @@index([sessionId])
+  @@map("claude_session_messages")
 }
 
 enum ClaudeSessionState {
