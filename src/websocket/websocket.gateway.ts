@@ -19,6 +19,8 @@ interface AuthenticatedSocket extends Socket {
   userId?: string;
   deviceId?: string;
   isDevice?: boolean; // true if connection is from CLI tool, false if from mobile app
+  clientType?: 'user-scoped' | 'session-scoped'; // Connection scoping type
+  sessionId?: string; // Session ID for session-scoped connections
 }
 
 // Chat message payload from AI tool
@@ -53,6 +55,17 @@ interface TerminalOutputPayload {
   exitCode?: number;
 }
 
+// User message payload (SDK-based approach)
+interface UserMessagePayload {
+  deviceId: string;
+  message: string;
+  sessionKey?: string;
+  mode?: {
+    permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+    model?: string;
+  };
+}
+
 @WebSocketGateway({
   cors: {
     origin: '*', // Configure properly in production
@@ -71,6 +84,9 @@ export class WebsocketGateway
   // Track connected clients
   private userConnections = new Map<string, Set<string>>(); // userId -> Set of socket IDs
   private deviceConnections = new Map<string, string>(); // deviceId -> socket ID
+  private sessionConnections = new Map<string, string>(); // sessionId -> socket ID (for session-scoped CLI connections)
+  private sessionSockets = new Map<string, Socket>(); // sessionId -> Socket object (direct reference)
+  private userCliConnections = new Map<string, Set<string>>(); // userId -> Set of sessionIds (track CLIs by user for cross-device routing)
 
   constructor(
     private configService: ConfigService,
@@ -93,6 +109,8 @@ export class WebsocketGateway
   }
 
   async handleConnection(client: AuthenticatedSocket) {
+    this.logger.log(`handleConnection start: auth=${JSON.stringify(client.handshake.auth)}`);
+
     try {
       // Extract token from handshake
       const token =
@@ -121,29 +139,201 @@ export class WebsocketGateway
         }
       }
 
-      // Check if this is a device connection (CLI tool)
+      // Check connection type: session-scoped (CLI per session) or device-scoped (CLI per device)
+      const clientType = client.handshake.auth?.clientType as 'user-scoped' | 'session-scoped' | undefined;
+      const sessionId = client.handshake.auth?.sessionId as string | undefined;
       const deviceId = client.handshake.auth?.deviceId;
-      if (deviceId) {
+      const authUserId = client.handshake.auth?.userId as string | undefined; // userId passed by CLI
+
+      client.clientType = clientType;
+
+      // Handle session-scoped connections (CLI per session - the Happy-Reference pattern)
+      if (clientType === 'session-scoped' && sessionId) {
+        client.sessionId = sessionId;
+        client.deviceId = deviceId;
+        client.isDevice = true;
+        this.sessionConnections.set(sessionId, client.id);
+        this.sessionSockets.set(sessionId, client); // Store socket directly
+
+        // Also track by device if provided, and get userId from device if not set via token
+        if (deviceId) {
+          this.deviceConnections.set(deviceId, client.id);
+
+          // Get device metadata from handshake headers
+          const deviceName = client.handshake.headers['x-device-name'] as string || 'CLI Device';
+          const devicePlatform = client.handshake.headers['x-device-platform'] as string || 'windows';
+          const deviceHostname = client.handshake.headers['x-device-hostname'] as string || undefined;
+
+          try {
+            const device = await this.devicesService.updateStatus(deviceId, DeviceStatus.ONLINE);
+            // Set client.userId from device if not already set via token
+            if (!client.userId && device.userId && device.userId !== 'pending') {
+              client.userId = device.userId;
+              // Also add to user connections
+              if (!this.userConnections.has(device.userId)) {
+                this.userConnections.set(device.userId, new Set());
+              }
+              this.userConnections.get(device.userId)!.add(client.id);
+              client.join(`user:${device.userId}`);
+              this.logger.log(`Set client.userId from device: ${device.userId}`);
+            }
+            // Notify user that device/session is active
+            if (device.userId && device.userId !== 'pending') {
+              this.server.to(`user:${device.userId}`).emit('device_status', {
+                deviceId,
+                status: DeviceStatus.ONLINE,
+              });
+              this.server.to(`user:${device.userId}`).emit('session_connected', {
+                deviceId,
+                sessionId,
+              });
+            }
+          } catch (error) {
+            this.logger.error(`Error updating device status: ${error}`);
+
+            // Auto-register device if it doesn't exist but we have a valid userId
+            const effectiveUserId = client.userId || authUserId;
+            if (effectiveUserId) {
+              this.logger.log(`Auto-registering device ${deviceId} for user ${effectiveUserId}`);
+              try {
+                const newDevice = await this.devicesService.autoRegister(deviceId, effectiveUserId, {
+                  name: deviceName,
+                  platform: devicePlatform,
+                  hostname: deviceHostname,
+                  type: 'desktop',
+                });
+                this.logger.log(`Device ${deviceId} auto-registered successfully`);
+
+                // Set client.userId if not already set
+                if (!client.userId) {
+                  client.userId = effectiveUserId;
+                  if (!this.userConnections.has(effectiveUserId)) {
+                    this.userConnections.set(effectiveUserId, new Set());
+                  }
+                  this.userConnections.get(effectiveUserId)!.add(client.id);
+                  client.join(`user:${effectiveUserId}`);
+                }
+
+                // Notify user that device/session is active
+                this.server.to(`user:${effectiveUserId}`).emit('device_status', {
+                  deviceId,
+                  status: DeviceStatus.ONLINE,
+                });
+                this.server.to(`user:${effectiveUserId}`).emit('session_connected', {
+                  deviceId,
+                  sessionId,
+                });
+              } catch (autoRegisterError) {
+                this.logger.error(`Failed to auto-register device: ${autoRegisterError}`);
+                // Still set userId from CLI auth as fallback
+                if (!client.userId && authUserId) {
+                  client.userId = authUserId;
+                  if (!this.userConnections.has(authUserId)) {
+                    this.userConnections.set(authUserId, new Set());
+                  }
+                  this.userConnections.get(authUserId)!.add(client.id);
+                  client.join(`user:${authUserId}`);
+                  this.logger.log(`Set client.userId from CLI auth (auto-register failed): ${authUserId}`);
+                }
+              }
+            } else {
+              this.logger.warn(`Cannot auto-register device ${deviceId}: no userId available`);
+            }
+          }
+        }
+
+        // If no deviceId but userId passed by CLI, use that
+        if (!client.userId && authUserId) {
+          client.userId = authUserId;
+          if (!this.userConnections.has(authUserId)) {
+            this.userConnections.set(authUserId, new Set());
+          }
+          this.userConnections.get(authUserId)!.add(client.id);
+          client.join(`user:${authUserId}`);
+          this.logger.log(`Set client.userId from CLI auth: ${authUserId}`);
+        }
+
+        // Join session-specific room
+        client.join(`session:${sessionId}`);
+
+        // Also join device room for backward compatibility
+        if (deviceId) {
+          client.join(`device:${deviceId}`);
+        }
+
+        this.logger.log(`Session-scoped CLI connected: session=${sessionId}, device=${deviceId}, userId=${client.userId} (socket: ${client.id})`);
+
+        // Track by userId for cross-device routing (allows mobile to find CLI regardless of deviceId)
+        if (client.userId) {
+          if (!this.userCliConnections.has(client.userId)) {
+            this.userCliConnections.set(client.userId, new Set());
+          }
+          this.userCliConnections.get(client.userId)!.add(sessionId);
+          this.logger.log(`Added CLI session ${sessionId} to user ${client.userId}'s CLI connections`);
+        }
+      }
+      // Handle legacy device-scoped connections
+      else if (deviceId) {
         client.deviceId = deviceId;
         client.isDevice = true;
         this.deviceConnections.set(deviceId, client.id);
 
-        // Update device status to online
-        await this.devicesService.updateStatus(deviceId, DeviceStatus.ONLINE);
-
         // Join device room
         client.join(`device:${deviceId}`);
 
-        // Notify user that device is online
-        const device = await this.devicesService.updateStatus(
-          deviceId,
-          DeviceStatus.ONLINE,
-        );
-        if (device.userId && device.userId !== 'pending') {
-          this.server.to(`user:${device.userId}`).emit('device_status', {
-            deviceId,
-            status: DeviceStatus.ONLINE,
-          });
+        // Get device metadata from handshake headers
+        const deviceName = client.handshake.headers['x-device-name'] as string || 'CLI Device';
+        const devicePlatform = client.handshake.headers['x-device-platform'] as string || 'windows';
+        const deviceHostname = client.handshake.headers['x-device-hostname'] as string || undefined;
+
+        try {
+          // Update device status to online
+          const device = await this.devicesService.updateStatus(deviceId, DeviceStatus.ONLINE);
+
+          // Notify user that device is online
+          if (device.userId && device.userId !== 'pending') {
+            this.server.to(`user:${device.userId}`).emit('device_status', {
+              deviceId,
+              status: DeviceStatus.ONLINE,
+            });
+          }
+        } catch (error) {
+          this.logger.error(`Error updating device status: ${error}`);
+
+          // Auto-register device if it doesn't exist but we have a valid userId
+          const effectiveUserId = client.userId || authUserId;
+          if (effectiveUserId) {
+            this.logger.log(`Auto-registering device ${deviceId} for user ${effectiveUserId}`);
+            try {
+              const newDevice = await this.devicesService.autoRegister(deviceId, effectiveUserId, {
+                name: deviceName,
+                platform: devicePlatform,
+                hostname: deviceHostname,
+                type: 'desktop',
+              });
+              this.logger.log(`Device ${deviceId} auto-registered successfully`);
+
+              // Set client.userId if not already set
+              if (!client.userId) {
+                client.userId = effectiveUserId;
+                if (!this.userConnections.has(effectiveUserId)) {
+                  this.userConnections.set(effectiveUserId, new Set());
+                }
+                this.userConnections.get(effectiveUserId)!.add(client.id);
+                client.join(`user:${effectiveUserId}`);
+              }
+
+              // Notify user that device is online
+              this.server.to(`user:${effectiveUserId}`).emit('device_status', {
+                deviceId,
+                status: DeviceStatus.ONLINE,
+              });
+            } catch (autoRegisterError) {
+              this.logger.error(`Failed to auto-register device: ${autoRegisterError}`);
+            }
+          } else {
+            this.logger.warn(`Cannot auto-register device ${deviceId}: no userId available`);
+          }
         }
 
         this.logger.log(`Device ${deviceId} connected (socket: ${client.id})`);
@@ -167,6 +357,46 @@ export class WebsocketGateway
       this.logger.log(
         `User ${client.userId} disconnected (socket: ${client.id})`,
       );
+    }
+
+    // Handle session-scoped disconnection
+    if (client.sessionId) {
+      this.sessionConnections.delete(client.sessionId);
+      this.sessionSockets.delete(client.sessionId); // Remove socket reference
+
+      // Clean up userCliConnections
+      if (client.userId) {
+        const userSessions = this.userCliConnections.get(client.userId);
+        if (userSessions) {
+          userSessions.delete(client.sessionId);
+          if (userSessions.size === 0) {
+            this.userCliConnections.delete(client.userId);
+          }
+          this.logger.log(`Removed CLI session ${client.sessionId} from user ${client.userId}'s CLI connections`);
+        }
+      }
+
+      this.logger.log(
+        `Session ${client.sessionId} disconnected (socket: ${client.id})`,
+      );
+
+      // Notify user about session disconnection
+      if (client.deviceId) {
+        try {
+          const device = await this.devicesService.updateStatus(
+            client.deviceId,
+            DeviceStatus.ONLINE, // Device may still be online, just this session ended
+          );
+          if (device.userId && device.userId !== 'pending') {
+            this.server.to(`user:${device.userId}`).emit('session_disconnected', {
+              deviceId: client.deviceId,
+              sessionId: client.sessionId,
+            });
+          }
+        } catch (error) {
+          this.logger.error(`Error handling session disconnect: ${error}`);
+        }
+      }
     }
 
     // Handle device disconnection
@@ -297,6 +527,26 @@ export class WebsocketGateway
     this.server.to(`device:${deviceId}`).emit(event, data);
   }
 
+  // Helper method to send to specific session (session-scoped CLI connection)
+  sendToSession(sessionId: string, event: string, data: any) {
+    this.logger.log(`sendToSession: ${event} to session:${sessionId}`);
+    this.server.to(`session:${sessionId}`).emit(event, data);
+  }
+
+  // Helper method to emit to session - sends to both session-scoped CLI and user-scoped mobile
+  emitToSession(sessionId: string, event: string, data: any, userId?: string) {
+    // Send to session-scoped CLI
+    this.server.to(`session:${sessionId}`).emit(event, data);
+
+    // Also send to transcript room for mobile clients watching this session
+    this.server.to(`transcript:${sessionId}`).emit(event, data);
+
+    // If userId provided, also send to user's general channel
+    if (userId) {
+      this.server.to(`user:${userId}`).emit(event, data);
+    }
+  }
+
   // Check if user is online
   isUserOnline(userId: string): boolean {
     return (
@@ -308,6 +558,22 @@ export class WebsocketGateway
   // Check if device is online
   isDeviceOnline(deviceId: string): boolean {
     return this.deviceConnections.has(deviceId);
+  }
+
+  // Check if session is connected
+  isSessionConnected(sessionId: string): boolean {
+    return this.sessionConnections.has(sessionId);
+  }
+
+  // Get socket for session
+  getSessionSocket(sessionId: string): Socket | undefined {
+    // Use directly stored socket reference (like Happy does)
+    const socket = this.sessionSockets.get(sessionId);
+    console.log(`[DEBUG] getSessionSocket: sessionId=${sessionId}, hasSocket=${!!socket}, connected=${socket?.connected}, sessionSocketsKeys=${JSON.stringify(Array.from(this.sessionSockets.keys()))}`);
+    if (socket && socket.connected) {
+      return socket;
+    }
+    return undefined;
   }
 
   // ==================== CHAT EVENTS ====================
@@ -490,12 +756,86 @@ export class WebsocketGateway
     this.sendToDevice(data.deviceId, 'terminal_command', {
       terminalSessionId: data.terminalSessionId,
       command: data.command,
+      deviceId: data.deviceId,
       requestedBy: client.userId,
     });
 
     this.logger.log(
       `Command sent to device ${data.deviceId}: ${data.command.substring(0, 50)}`,
     );
+    return { success: true };
+  }
+
+  // Mobile app sends user message to Claude session (SDK-based approach)
+  @SubscribeMessage('user_message')
+  handleUserMessage(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: UserMessagePayload,
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    const payload = {
+      deviceId: data.deviceId,
+      message: data.message,
+      sessionKey: data.sessionKey,
+      mode: data.mode,
+    };
+
+    // Prefer session-scoped routing if sessionKey is provided and session is connected
+    if (data.sessionKey && this.isSessionConnected(data.sessionKey)) {
+      this.sendToSession(data.sessionKey, 'user_message', payload);
+      this.logger.log(
+        `User message sent to session ${data.sessionKey}: ${data.message.substring(0, 50)}`,
+      );
+    } else {
+      // Fallback to device routing
+      this.sendToDevice(data.deviceId, 'user_message', payload);
+      this.logger.log(
+        `User message sent to device ${data.deviceId}: ${data.message.substring(0, 50)}`,
+      );
+    }
+
+    return { success: true };
+  }
+
+  // Mobile app sends abort request
+  @SubscribeMessage('claude_abort')
+  handleClaudeAbort(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string; sessionKey?: string },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    this.sendToDevice(data.deviceId, 'claude_abort', {
+      deviceId: data.deviceId,
+      sessionKey: data.sessionKey,
+    });
+
+    this.logger.log(`Abort request sent to device ${data.deviceId}`);
+    return { success: true };
+  }
+
+  // Mobile app sends mode change request
+  @SubscribeMessage('claude_mode_change')
+  handleClaudeModeChange(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string; sessionKey?: string; mode: any },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    this.sendToDevice(data.deviceId, 'claude_mode_change', {
+      deviceId: data.deviceId,
+      sessionKey: data.sessionKey,
+      mode: data.mode,
+    });
+
+    this.logger.log(`Mode change sent to device ${data.deviceId}`);
     return { success: true };
   }
 
@@ -625,27 +965,63 @@ export class WebsocketGateway
     @MessageBody()
     data: {
       sessionKey: string;
+      deviceId?: string; // Accept deviceId from body as fallback
       directory: string;
       state: 'active' | 'inactive' | 'suspended';
       lastUsedAt?: string;
       transcriptPath?: string;
     },
   ) {
-    if (!client.deviceId) {
+    // Use deviceId from body as fallback (handles race condition where
+    // handleConnection hasn't finished setting client.deviceId yet)
+    const deviceId = client.deviceId || data.deviceId;
+    this.logger.log(`Received claude_session_update: ${data.sessionKey}, deviceId: ${deviceId}, transcriptPath: ${data.transcriptPath}`);
+
+    if (!deviceId) {
+      this.logger.warn(`claude_session_update rejected: no deviceId on socket or in data`);
       return { error: 'Not authenticated as device' };
     }
 
-    // Upsert session in DB
-    const session = await this.claudeSessionsService.upsertSession(
-      client.deviceId,
-      data,
-    );
+    // Set client.deviceId if it was missing but provided in data
+    if (!client.deviceId && data.deviceId) {
+      client.deviceId = data.deviceId;
+      client.isDevice = true;
+    }
 
-    // Broadcast to device subscribers
-    this.server.to(`device:${client.deviceId}`).emit('claude_session_update', {
-      ...session,
-      deviceId: client.deviceId,
-    });
+    // Prepare session data for broadcast
+    const sessionData = {
+      sessionKey: data.sessionKey,
+      directory: data.directory,
+      state: data.state,
+      lastUsedAt: data.lastUsedAt || new Date().toISOString(),
+      transcriptPath: data.transcriptPath,
+      deviceId: deviceId,
+    };
+
+    // Try to upsert session in DB, but don't block broadcast on failure
+    try {
+      const session = await this.claudeSessionsService.upsertSession(
+        deviceId,
+        data,
+      );
+      // Use DB-saved session data if available
+      Object.assign(sessionData, session);
+    } catch (error) {
+      // Log but don't throw - still broadcast the update
+      this.logger.warn(`Failed to save session to DB (broadcasting anyway): ${error}`);
+    }
+
+    // Broadcast to device subscribers (always happens)
+    this.server.to(`device:${deviceId}`).emit('claude_session_update', sessionData);
+
+    // Also broadcast to user's room for cross-device updates
+    if (client.userId) {
+      this.server.to(`user:${client.userId}`).emit('claude_session_update', sessionData);
+    }
+
+    // Also broadcast to transcript room for viewers of this session
+    // This ensures mobile clients watching this session get timestamp updates
+    this.server.to(`transcript:${data.sessionKey}`).emit('claude_session_update', sessionData);
 
     return { success: true };
   }
@@ -893,6 +1269,199 @@ export class WebsocketGateway
     return { success: true };
   }
 
+  // Mobile subscribes to SDK streaming session (no transcript file watching)
+  // This just joins the room to receive claude_message events from CLI
+  @SubscribeMessage('transcript_subscribe_sdk')
+  handleTranscriptSubscribeSdk(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody()
+    data: {
+      deviceId: string;
+      sessionKey: string;
+    },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    const roomName = `transcript:${data.sessionKey}`;
+    this.logger.log(`Mobile joining SDK streaming room: ${roomName}, userId: ${client.userId}`);
+
+    // Join transcript room - CLI sends claude_message events here
+    client.join(roomName);
+
+    // Also tell CLI to start watching this session's transcript for live updates
+    // Find a connected CLI for this user
+    const userSessions = this.userCliConnections.get(client.userId);
+    if (userSessions && userSessions.size > 0) {
+      const cliSessionId = userSessions.values().next().value;
+      this.logger.log(`Forwarding transcript_subscribe_sdk_start to CLI session: ${cliSessionId}`);
+      this.sendToSession(cliSessionId, 'transcript_subscribe_sdk_start', {
+        sessionKey: data.sessionKey,
+        requestedBy: client.userId,
+      });
+    } else {
+      this.logger.warn(`No CLI connected for user ${client.userId} to start transcript watching`);
+    }
+
+    return { success: true };
+  }
+
+  // Mobile unsubscribes from SDK streaming session
+  @SubscribeMessage('transcript_unsubscribe_sdk')
+  handleTranscriptUnsubscribeSdk(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody()
+    data: {
+      deviceId: string;
+      sessionKey: string;
+    },
+  ) {
+    const roomName = `transcript:${data.sessionKey}`;
+    this.logger.log(`Mobile leaving SDK streaming room: ${roomName}`);
+    client.leave(roomName);
+    return { success: true };
+  }
+
+  // Mobile requests SDK session message history
+  // Forwards to CLI via RPC to read from Claude's JSONL transcript files
+  @SubscribeMessage('sdk_session_history')
+  async handleSdkSessionHistory(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody()
+    data: {
+      deviceId: string;
+      sessionKey: string;
+      claudeSessionId?: string; // Can be passed directly from mobile
+      limit?: number;
+      offset?: number;
+    },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    this.logger.log(`Mobile requesting SDK session history: ${data.sessionKey}`);
+    console.log(`[DEBUG] sdk_session_history called for sessionKey=${data.sessionKey}, deviceId=${data.deviceId}, claudeSessionId=${data.claudeSessionId}`);
+
+    // Use claudeSessionId from request if provided, otherwise try DB lookup
+    let claudeSessionId = data.claudeSessionId || null;
+    if (!claudeSessionId) {
+      const session = await this.claudeSessionsService.getSessionByKey(
+        data.deviceId,
+        data.sessionKey,
+      );
+      claudeSessionId = session?.claudeSessionId || null;
+      console.log(`[DEBUG] claudeSessionId from DB: ${claudeSessionId}`);
+    } else {
+      console.log(`[DEBUG] Using claudeSessionId from request: ${claudeSessionId}`);
+    }
+
+    // Find ANY connected CLI for this user (not just the exact session or device)
+    // This allows viewing history for old sessions as long as ANY CLI for this user is connected
+    let cliSocket: Socket | undefined;
+    let connectedSessionKey: string | undefined;
+
+    // First try the exact session
+    if (this.isSessionConnected(data.sessionKey)) {
+      cliSocket = this.getSessionSocket(data.sessionKey);
+      connectedSessionKey = data.sessionKey;
+      console.log(`[DEBUG] Found exact session ${data.sessionKey}`);
+    }
+
+    // If not found, try by userId (the Happy-coder pattern)
+    if (!cliSocket && client.userId) {
+      const userSessions = this.userCliConnections.get(client.userId);
+      console.log(`[DEBUG] Looking for CLI by userId ${client.userId}, userSessions: ${userSessions ? Array.from(userSessions) : 'none'}`);
+      if (userSessions) {
+        for (const sessionId of userSessions) {
+          const socket = this.sessionSockets.get(sessionId) as AuthenticatedSocket | undefined;
+          if (socket?.connected) {
+            cliSocket = socket;
+            connectedSessionKey = sessionId;
+            console.log(`[DEBUG] Using user's CLI session ${sessionId} for userId ${client.userId}`);
+            break;
+          }
+        }
+      }
+    }
+
+    // Fallback: try by deviceId (legacy approach)
+    if (!cliSocket) {
+      for (const [sessionId, socketId] of this.sessionConnections.entries()) {
+        const socket = this.sessionSockets.get(sessionId) as AuthenticatedSocket | undefined;
+        console.log(`[DEBUG] Fallback - Checking session ${sessionId}: connected=${socket?.connected}, socketDeviceId=${socket?.deviceId}, requestedDeviceId=${data.deviceId}`);
+        if (socket?.connected && socket.deviceId === data.deviceId) {
+          cliSocket = socket;
+          connectedSessionKey = sessionId;
+          console.log(`[DEBUG] Using alternate CLI session ${sessionId} for device ${data.deviceId}`);
+          break;
+        }
+      }
+    }
+
+    console.log(`[DEBUG] sessionConnections keys:`, Array.from(this.sessionConnections.keys()));
+    console.log(`[DEBUG] userCliConnections keys:`, Array.from(this.userCliConnections.keys()));
+    console.log(`[DEBUG] Found CLI socket: ${cliSocket ? 'yes' : 'no'}, via session: ${connectedSessionKey}`);
+
+    // Forward to CLI via RPC
+    const requestId = `history-${Date.now()}`;
+
+    if (!cliSocket) {
+      console.log(`[DEBUG] No CLI socket found for session ${data.sessionKey}`);
+      client.emit('sdk_session_history', {
+        sessionKey: data.sessionKey,
+        entries: [],
+        totalEntries: 0,
+        hasMore: false,
+      });
+      return { success: true };
+    }
+
+    // Set up timeout for response
+    const timeout = setTimeout(() => {
+      this.logger.warn(`RPC timeout for get_session_history: ${requestId}`);
+      client.emit('sdk_session_history', {
+        sessionKey: data.sessionKey,
+        entries: [],
+        totalEntries: 0,
+        hasMore: false,
+      });
+    }, 5000);
+
+    // Listen for RPC response from CLI
+    const responseHandler = (response: any) => {
+      if (response.requestId === requestId) {
+        clearTimeout(timeout);
+        cliSocket.off('rpc_response', responseHandler);
+
+        client.emit('sdk_session_history', {
+          sessionKey: data.sessionKey,
+          entries: response.result?.entries || [],
+          totalEntries: response.result?.totalEntries || 0,
+          hasMore: response.result?.hasMore || false,
+        });
+      }
+    };
+
+    cliSocket.on('rpc_response', responseHandler);
+
+    // Send RPC request to CLI
+    console.log(`[DEBUG] Sending RPC get_session_history to CLI, requestId=${requestId}, claudeSessionId=${claudeSessionId}, sessionKey=${data.sessionKey}`);
+    this.sendToSession(connectedSessionKey!, 'rpc_request', {
+      requestId,
+      method: 'get_session_history',
+      params: {
+        claudeSessionId,
+        sessionKey: data.sessionKey, // Pass original sessionKey so CLI can look it up
+        limit: data.limit ?? 400,
+        offset: data.offset ?? 0,
+      },
+    });
+
+    return { success: true };
+  }
+
   // Device sends transcript history
   @SubscribeMessage('transcript_history')
   handleTranscriptHistory(
@@ -927,6 +1496,239 @@ export class WebsocketGateway
     // Broadcast to all subscribers of this transcript
     this.server.to(roomName).emit('transcript_update', data);
 
+    return { success: true };
+  }
+
+  // ==================== CLAUDE SDK STREAMING EVENTS ====================
+
+  // Device sends Claude message (from SDK streaming)
+  @SubscribeMessage('claude_message')
+  async handleClaudeMessage(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      deviceId: string;
+      sessionKey: string;
+      message: {
+        id: string;
+        type: 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system' | 'result';
+        content?: string;
+        toolName?: string;
+        toolInput?: any;
+        isError?: boolean;
+        partial?: boolean;
+      };
+    },
+  ) {
+    if (!client.deviceId) {
+      return { error: 'Not authenticated as device' };
+    }
+
+    const roomName = `transcript:${data.sessionKey}`;
+    this.logger.log(
+      `Broadcasting claude_message to room: ${roomName}, type: ${data.message?.type}`,
+    );
+
+    // Broadcast to mobile clients
+    this.server.to(roomName).emit('claude_message', data);
+
+    // Store message in database (only for non-partial, completed messages)
+    if (data.message && !data.message.partial && data.message.id) {
+      try {
+        await this.claudeSessionsService.storeMessage(
+          data.deviceId,
+          data.sessionKey,
+          {
+            messageId: data.message.id,
+            type: data.message.type,
+            content: data.message.content,
+            toolName: data.message.toolName,
+            toolInput: data.message.toolInput,
+            isError: data.message.isError,
+          },
+        );
+      } catch (error) {
+        this.logger.error(`Failed to store message: ${error}`);
+      }
+    }
+
+    return { success: true };
+  }
+
+  // Device sends thinking state
+  @SubscribeMessage('thinking_state')
+  handleThinkingState(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      deviceId: string;
+      sessionKey: string;
+      thinking: boolean;
+    },
+  ) {
+    if (!client.deviceId) {
+      return { error: 'Not authenticated as device' };
+    }
+
+    const roomName = `transcript:${data.sessionKey}`;
+    this.server.to(roomName).emit('thinking_state', data);
+    return { success: true };
+  }
+
+  // ==================== RPC FORWARDING ====================
+
+  // Mobile app calls RPC method on CLI session
+  @SubscribeMessage('rpc_call')
+  async handleRpcCall(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      method: string;
+      params: any;
+      targetSessionId?: string;
+      targetDeviceId?: string;
+      timeout?: number;
+    },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    const { method, params, targetSessionId, targetDeviceId, timeout = 30000 } = data;
+
+    // Determine target socket
+    let targetSocket: Socket | undefined;
+
+    if (targetSessionId && this.isSessionConnected(targetSessionId)) {
+      targetSocket = this.getSessionSocket(targetSessionId);
+      this.logger.log(`RPC call to session ${targetSessionId}: ${method}`);
+    } else if (targetDeviceId) {
+      const socketId = this.deviceConnections.get(targetDeviceId);
+      if (socketId) {
+        targetSocket = this.server.sockets.sockets.get(socketId);
+      }
+      this.logger.log(`RPC call to device ${targetDeviceId}: ${method}`);
+    }
+
+    if (!targetSocket) {
+      return { ok: false, error: 'Target not connected' };
+    }
+
+    try {
+      // Forward RPC request to CLI and wait for response
+      const response = await targetSocket
+        .timeout(timeout)
+        .emitWithAck('rpc_request', { method, params, requestId: `rpc-${Date.now()}` });
+
+      return { ok: true, result: response };
+    } catch (error) {
+      this.logger.error(`RPC call failed: ${error}`);
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : 'RPC call failed',
+      };
+    }
+  }
+
+  // Forward RPC response from CLI to mobile
+  @SubscribeMessage('rpc_response')
+  handleRpcResponse(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      requestId: string;
+      result?: any;
+      error?: { code: number; message: string };
+    },
+  ) {
+    // RPC responses are typically handled via acknowledgement callbacks
+    // This handler is for backward compatibility with the event-based approach
+    this.logger.log(`RPC response received: ${data.requestId}`);
+
+    // Broadcast to any listeners
+    if (client.deviceId) {
+      this.server.to(`device:${client.deviceId}`).emit('rpc_response', data);
+    }
+    if (client.sessionId) {
+      this.server.to(`transcript:${client.sessionId}`).emit('rpc_response', data);
+    }
+
+    return { success: true };
+  }
+
+  // Session keep-alive from CLI
+  @SubscribeMessage('session-alive')
+  handleSessionAlive(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      sessionId: string;
+      deviceId?: string;
+      time: number;
+      thinking: boolean;
+      mode: 'local' | 'remote';
+    },
+  ) {
+    // Update session status if needed
+    if (data.sessionId && client.sessionId === data.sessionId) {
+      // Emit to subscribers watching this session
+      const roomName = `transcript:${data.sessionId}`;
+      this.server.to(roomName).emit('session_alive', {
+        sessionId: data.sessionId,
+        thinking: data.thinking,
+        mode: data.mode,
+        timestamp: data.time,
+      });
+    }
+
+    return { success: true };
+  }
+
+  // Session event from CLI (ready, switch mode, etc.)
+  @SubscribeMessage('claude_session_event')
+  handleClaudeSessionEvent(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      deviceId: string;
+      sessionKey: string;
+      event: {
+        type: 'switch' | 'message' | 'permission-mode-changed' | 'ready';
+        mode?: string;
+        message?: string;
+      };
+    },
+  ) {
+    if (!client.deviceId && !client.sessionId) {
+      return { error: 'Not authenticated as device/session' };
+    }
+
+    const roomName = `transcript:${data.sessionKey}`;
+    this.server.to(roomName).emit('claude_session_event', data);
+
+    this.logger.log(`Session event: ${data.event.type} for ${data.sessionKey}`);
+    return { success: true };
+  }
+
+  // Permission request from CLI
+  @SubscribeMessage('permission_request')
+  handlePermissionRequest(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      deviceId: string;
+      sessionKey: string;
+      requestId: string;
+      type: 'tool_use' | 'file_write' | 'bash_command';
+      toolName?: string;
+      description: string;
+      details?: any;
+    },
+  ) {
+    if (!client.deviceId && !client.sessionId) {
+      return { error: 'Not authenticated as device/session' };
+    }
+
+    // Send to users watching this session
+    const roomName = `transcript:${data.sessionKey}`;
+    this.server.to(roomName).emit('permission_request', data);
+
+    this.logger.log(
+      `Permission request: ${data.type} ${data.toolName || ''} for ${data.sessionKey}`,
+    );
     return { success: true };
   }
 }

@@ -227,6 +227,47 @@ export class DevicesService {
     });
   }
 
+  // Auto-register a device that doesn't exist in the database
+  // This handles the case where a device was deleted but CLI still has its ID
+  async autoRegister(
+    deviceId: string,
+    userId: string,
+    options?: {
+      name?: string;
+      type?: string;
+      platform?: string;
+      hostname?: string;
+    },
+  ): Promise<Device> {
+    const type = options?.type ? this.mapDeviceType(options.type) : DeviceType.DESKTOP;
+    const platform = options?.platform ? this.mapPlatform(options.platform) : Platform.WINDOWS;
+
+    return this.prisma.device.create({
+      data: {
+        id: deviceId,
+        name: options?.name || 'CLI Device',
+        type,
+        platform,
+        hostname: options?.hostname,
+        userId,
+        status: DeviceStatus.ONLINE,
+        lastSeenAt: new Date(),
+      },
+      include: {
+        connectedTools: true,
+      },
+    });
+  }
+
+  // Check if a device exists
+  async exists(deviceId: string): Promise<boolean> {
+    const device = await this.prisma.device.findUnique({
+      where: { id: deviceId },
+      select: { id: true },
+    });
+    return device !== null;
+  }
+
   // Delete/remove device
   async remove(userId: string, deviceId: string): Promise<void> {
     // Verify ownership
