@@ -9,6 +9,7 @@ import { TerminalModule } from './terminal/terminal.module';
 import { GithubModule } from './github/github.module';
 import { WebsocketModule } from './websocket/websocket.module';
 import { ClaudeSessionsModule } from './claude-sessions/claude-sessions.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { ClaudeSessionsModule } from './claude-sessions/claude-sessions.module';
     TerminalModule,
     GithubModule,
     ClaudeSessionsModule,
+    NotificationsModule,
 
     // WebSocket
     WebsocketModule,

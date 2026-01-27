@@ -260,3 +260,17 @@ enum ApprovalStatus {
   APPROVED
   REJECTED
 }
+
+// Push notification tokens for mobile devices
+model PushToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String
+  platform  String   // ios, android
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, token])
+  @@index([userId])
+  @@map("push_tokens")
+}

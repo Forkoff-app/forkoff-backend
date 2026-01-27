@@ -13,6 +13,7 @@ import { ConfigService } from '@nestjs/config';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { DevicesService } from '../devices/devices.service';
 import { ClaudeSessionsService } from '../claude-sessions/claude-sessions.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { DeviceStatus, MessageRole, ApprovalType } from '@prisma/client';
 
 interface AuthenticatedSocket extends Socket {
@@ -38,7 +39,7 @@ interface ApprovalRequestPayload {
   messageId: string;
   type: ApprovalType;
   description: string;
-  changes: any;
+  changes: Record<string, unknown>;
 }
 
 // Terminal command payload
@@ -63,6 +64,64 @@ interface UserMessagePayload {
   mode?: {
     permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
     model?: string;
+  };
+}
+
+// Claude mode change payload
+interface ClaudeModeChangePayload {
+  deviceId: string;
+  sessionKey?: string;
+  mode: {
+    permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+    model?: string;
+  };
+}
+
+// Transcript entry structure
+interface TranscriptEntryPayload {
+  id: string;
+  parentId?: string;
+  type: 'user' | 'assistant' | 'system' | 'tool_use' | 'tool_result';
+  timestamp: string;
+  lineNumber?: number;
+  content?: {
+    role?: 'user' | 'assistant';
+    text?: string;
+    toolName?: string;
+    toolInput?: Record<string, unknown>;
+    isError?: boolean;
+    filePath?: string;
+    diff?: unknown[];
+  };
+}
+
+// Transcript history payload from device
+interface TranscriptHistoryPayload {
+  sessionKey: string;
+  entries: TranscriptEntryPayload[];
+  totalEntries: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+// Transcript update payload from device
+interface TranscriptUpdatePayload {
+  sessionKey: string;
+  entry: TranscriptEntryPayload;
+}
+
+// Claude message payload from device (SDK streaming)
+interface ClaudeMessagePayload {
+  deviceId: string;
+  sessionKey: string;
+  message: {
+    id: string;
+    type: 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system' | 'result';
+    content?: string;
+    toolName?: string;
+    toolInput?: Record<string, unknown>;
+    isError?: boolean;
+    partial?: boolean;
   };
 }
 
@@ -92,6 +151,7 @@ export class WebsocketGateway
     private configService: ConfigService,
     private devicesService: DevicesService,
     private claudeSessionsService: ClaudeSessionsService,
+    private notificationsService: NotificationsService,
   ) {
     const supabaseUrl = configService.get<string>('SUPABASE_URL');
     const supabaseServiceKey = configService.get<string>('SUPABASE_SERVICE_KEY');
@@ -466,7 +526,7 @@ export class WebsocketGateway
   async handleDeviceHeartbeat(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { status?: string },
-  ) {
+  ): Promise<{ success: true } | { error: string }> {
     if (!client.deviceId) {
       return { error: 'Not authenticated as device' };
     }
@@ -494,7 +554,7 @@ export class WebsocketGateway
   async handleDeviceSyncing(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { syncing: boolean },
-  ) {
+  ): Promise<{ success: true } | { error: string }> {
     if (!client.deviceId) {
       return { error: 'Not authenticated as device' };
     }
@@ -517,24 +577,24 @@ export class WebsocketGateway
   }
 
   // Helper method to send to specific user
-  sendToUser(userId: string, event: string, data: any) {
+  sendToUser(userId: string, event: string, data: unknown): void {
     this.server.to(`user:${userId}`).emit(event, data);
   }
 
   // Helper method to send to specific device
-  sendToDevice(deviceId: string, event: string, data: any) {
+  sendToDevice(deviceId: string, event: string, data: unknown): void {
     this.logger.log(`sendToDevice: ${event} to device:${deviceId}`);
     this.server.to(`device:${deviceId}`).emit(event, data);
   }
 
   // Helper method to send to specific session (session-scoped CLI connection)
-  sendToSession(sessionId: string, event: string, data: any) {
+  sendToSession(sessionId: string, event: string, data: unknown): void {
     this.logger.log(`sendToSession: ${event} to session:${sessionId}`);
     this.server.to(`session:${sessionId}`).emit(event, data);
   }
 
   // Helper method to emit to session - sends to both session-scoped CLI and user-scoped mobile
-  emitToSession(sessionId: string, event: string, data: any, userId?: string) {
+  emitToSession(sessionId: string, event: string, data: unknown, userId?: string): void {
     // Send to session-scoped CLI
     this.server.to(`session:${sessionId}`).emit(event, data);
 
@@ -823,8 +883,8 @@ export class WebsocketGateway
   @SubscribeMessage('claude_mode_change')
   handleClaudeModeChange(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: { deviceId: string; sessionKey?: string; mode: any },
-  ) {
+    @MessageBody() data: ClaudeModeChangePayload,
+  ): { success: true } | { error: string } {
     if (!client.userId) {
       return { error: 'Not authenticated' };
     }
@@ -1011,17 +1071,8 @@ export class WebsocketGateway
       this.logger.warn(`Failed to save session to DB (broadcasting anyway): ${error}`);
     }
 
-    // Broadcast to device subscribers (always happens)
+    // Broadcast to device subscribers (mobile subscribes via subscribeToDevice)
     this.server.to(`device:${deviceId}`).emit('claude_session_update', sessionData);
-
-    // Also broadcast to user's room for cross-device updates
-    if (client.userId) {
-      this.server.to(`user:${client.userId}`).emit('claude_session_update', sessionData);
-    }
-
-    // Also broadcast to transcript room for viewers of this session
-    // This ensures mobile clients watching this session get timestamp updates
-    this.server.to(`transcript:${data.sessionKey}`).emit('claude_session_update', sessionData);
 
     return { success: true };
   }
@@ -1430,7 +1481,15 @@ export class WebsocketGateway
     }, 5000);
 
     // Listen for RPC response from CLI
-    const responseHandler = (response: any) => {
+    interface RpcHistoryResponse {
+      requestId: string;
+      result?: {
+        entries?: unknown[];
+        totalEntries?: number;
+        hasMore?: boolean;
+      };
+    }
+    const responseHandler = (response: RpcHistoryResponse) => {
       if (response.requestId === requestId) {
         clearTimeout(timeout);
         cliSocket.off('rpc_response', responseHandler);
@@ -1466,8 +1525,8 @@ export class WebsocketGateway
   @SubscribeMessage('transcript_history')
   handleTranscriptHistory(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: any,
-  ) {
+    @MessageBody() data: TranscriptHistoryPayload,
+  ): { success: true } | { error: string } {
     if (!client.deviceId) {
       return { error: 'Not authenticated as device' };
     }
@@ -1482,8 +1541,8 @@ export class WebsocketGateway
   @SubscribeMessage('transcript_update')
   handleTranscriptUpdate(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: any,
-  ) {
+    @MessageBody() data: TranscriptUpdatePayload,
+  ): { success: true } | { error: string } {
     if (!client.deviceId) {
       return { error: 'Not authenticated as device' };
     }
@@ -1505,20 +1564,8 @@ export class WebsocketGateway
   @SubscribeMessage('claude_message')
   async handleClaudeMessage(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: {
-      deviceId: string;
-      sessionKey: string;
-      message: {
-        id: string;
-        type: 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system' | 'result';
-        content?: string;
-        toolName?: string;
-        toolInput?: any;
-        isError?: boolean;
-        partial?: boolean;
-      };
-    },
-  ) {
+    @MessageBody() data: ClaudeMessagePayload,
+  ): Promise<{ success: true } | { error: string }> {
     if (!client.deviceId) {
       return { error: 'Not authenticated as device' };
     }
@@ -1581,14 +1628,14 @@ export class WebsocketGateway
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: {
       method: string;
-      params: any;
+      params: Record<string, unknown>;
       targetSessionId?: string;
       targetDeviceId?: string;
       timeout?: number;
     },
-  ) {
+  ): Promise<{ ok: boolean; result?: unknown; error?: string }> {
     if (!client.userId) {
-      return { error: 'Not authenticated' };
+      return { ok: false, error: 'Not authenticated' };
     }
 
     const { method, params, targetSessionId, targetDeviceId, timeout = 30000 } = data;
@@ -1633,10 +1680,10 @@ export class WebsocketGateway
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: {
       requestId: string;
-      result?: any;
+      result?: unknown;
       error?: { code: number; message: string };
     },
-  ) {
+  ): { success: true } {
     // RPC responses are typically handled via acknowledgement callbacks
     // This handler is for backward compatibility with the event-based approach
     this.logger.log(`RPC response received: ${data.requestId}`);
@@ -1715,9 +1762,9 @@ export class WebsocketGateway
       type: 'tool_use' | 'file_write' | 'bash_command';
       toolName?: string;
       description: string;
-      details?: any;
+      details?: Record<string, unknown>;
     },
-  ) {
+  ): { success: true } | { error: string } {
     if (!client.deviceId && !client.sessionId) {
       return { error: 'Not authenticated as device/session' };
     }
@@ -1729,6 +1776,173 @@ export class WebsocketGateway
     this.logger.log(
       `Permission request: ${data.type} ${data.toolName || ''} for ${data.sessionKey}`,
     );
+    return { success: true };
+  }
+
+  // ==================== CLAUDE APPROVAL EVENTS ====================
+
+  // CLI sends Claude approval request (e.g., [y]es, [n]o, [p]lan prompt)
+  @SubscribeMessage('claude_approval_request')
+  async handleClaudeApprovalRequest(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      approvalId: string;
+      terminalSessionId: string;
+      sessionKey?: string;
+      context: string[];      // Recent output lines for context
+      options: string[];      // Available options (e.g., ['y:yes', 'n:no', 'p:plan'])
+      promptText: string;     // The actual prompt text
+    },
+  ) {
+    if (!client.deviceId && !client.sessionId) {
+      return { error: 'Not authenticated as device/session' };
+    }
+
+    const userId = client.userId;
+    if (!userId) {
+      this.logger.warn(`Claude approval request from device without userId`);
+      return { error: 'No userId associated with device' };
+    }
+
+    this.logger.log(
+      `Claude approval request: ${data.approvalId} from ${client.deviceId || client.sessionId}, userId: ${userId}`,
+    );
+
+    // Track pending approval with timeout
+    this.notificationsService.trackPendingApproval(
+      data.approvalId,
+      userId,
+      {
+        terminalSessionId: data.terminalSessionId,
+        sessionKey: data.sessionKey,
+        context: data.context,
+        options: data.options,
+        promptText: data.promptText,
+      },
+      (approvalId) => {
+        // On timeout, send auto-deny to CLI
+        this.logger.log(`Approval timeout for ${approvalId}, sending auto-deny`);
+        const sessionId = data.sessionKey || client.sessionId;
+        if (sessionId) {
+          this.sendToSession(sessionId, 'claude_approval_response', {
+            approvalId,
+            response: 'n',
+            respondedBy: 'system_timeout',
+          });
+        } else if (client.deviceId) {
+          this.sendToDevice(client.deviceId, 'claude_approval_response', {
+            approvalId,
+            response: 'n',
+            respondedBy: 'system_timeout',
+          });
+        }
+      },
+    );
+
+    // Forward to user's mobile clients via WebSocket
+    const roomName = data.sessionKey ? `transcript:${data.sessionKey}` : `user:${userId}`;
+    // Only send to user's channel (mobile is user-scoped, so this is the primary route)
+    // Avoid sending to multiple rooms to prevent duplicate messages
+    this.logger.log(`Sending claude_approval_request ${data.approvalId} to user:${userId}`);
+
+    this.server.to(`user:${userId}`).emit('claude_approval_request', {
+      ...data,
+      deviceId: client.deviceId,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Send push notification if user has registered tokens
+    try {
+      await this.notificationsService.sendApprovalNotification(userId, data.approvalId, {
+        terminalSessionId: data.terminalSessionId,
+        sessionKey: data.sessionKey,
+        context: data.context,
+        options: data.options,
+        promptText: data.promptText,
+      });
+    } catch (error) {
+      this.logger.error(`Failed to send push notification: ${error}`);
+    }
+
+    return { success: true };
+  }
+
+  // Mobile app responds to Claude approval request
+  @SubscribeMessage('claude_approval_response')
+  handleClaudeApprovalResponse(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      approvalId: string;
+      response: string;       // The response character ('y', 'n', 'p', etc.)
+      deviceId?: string;      // Optional: target device ID
+      sessionKey?: string;    // Optional: target session key
+    },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    this.logger.log(
+      `Claude approval response: ${data.approvalId} -> ${data.response} from ${client.userId}`,
+    );
+
+    // Complete the pending approval
+    const pending = this.notificationsService.completePendingApproval(data.approvalId);
+    if (!pending) {
+      this.logger.warn(`No pending approval found for ${data.approvalId}`);
+      return { error: 'Approval not found or already processed' };
+    }
+
+    // Route response back to CLI
+    // Prefer session-scoped routing, then device routing
+    const responsePayload = {
+      approvalId: data.approvalId,
+      response: data.response,
+      respondedBy: client.userId,
+    };
+
+    // Try session key from request, then from pending approval
+    const sessionKey = data.sessionKey || pending.sessionKey;
+    let routingSucceeded = false;
+
+    if (sessionKey && this.isSessionConnected(sessionKey)) {
+      this.sendToSession(sessionKey, 'claude_approval_response', responsePayload);
+      this.logger.log(`Sent approval response to session ${sessionKey}`);
+      routingSucceeded = true;
+    } else if (sessionKey) {
+      // Session key provided but not connected
+      this.logger.warn(`Session ${sessionKey} is not connected, trying fallback routing for approval ${data.approvalId}`);
+    }
+
+    if (!routingSucceeded && data.deviceId && this.isDeviceOnline(data.deviceId)) {
+      this.sendToDevice(data.deviceId, 'claude_approval_response', responsePayload);
+      this.logger.log(`Sent approval response to device ${data.deviceId}`);
+      routingSucceeded = true;
+    } else if (!routingSucceeded && data.deviceId) {
+      // Device ID provided but not online
+      this.logger.warn(`Device ${data.deviceId} is not online, trying fallback routing for approval ${data.approvalId}`);
+    }
+
+    if (!routingSucceeded) {
+      // Try to find CLI by userId as fallback
+      const userSessions = this.userCliConnections.get(pending.userId);
+      if (userSessions && userSessions.size > 0) {
+        const cliSessionId = userSessions.values().next().value;
+        if (this.isSessionConnected(cliSessionId)) {
+          this.sendToSession(cliSessionId, 'claude_approval_response', responsePayload);
+          this.logger.log(`Sent approval response to user's CLI session ${cliSessionId}`);
+          routingSucceeded = true;
+        } else {
+          this.logger.error(`User's CLI session ${cliSessionId} found but not connected for approval ${data.approvalId}`);
+        }
+      }
+    }
+
+    if (!routingSucceeded) {
+      this.logger.error(`Failed to route approval response for ${data.approvalId}: No connected CLI found (sessionKey=${sessionKey}, deviceId=${data.deviceId}, userId=${pending.userId})`);
+      return { error: 'No CLI connection found - the CLI may have disconnected' };
+    }
+
     return { success: true };
   }
 }
