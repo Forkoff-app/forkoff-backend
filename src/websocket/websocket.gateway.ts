@@ -1620,6 +1620,104 @@ export class WebsocketGateway
     return { success: true };
   }
 
+  // Device sends thinking content (extended thinking text)
+  @SubscribeMessage('thinking_content')
+  handleThinkingContent(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      sessionKey?: string;
+      thinkingId: string;
+      content: string;
+      partial: boolean;
+    },
+  ) {
+    if (!client.deviceId && !client.sessionId) {
+      return { error: 'Not authenticated as device/session' };
+    }
+
+    // Broadcast to session room
+    if (data.sessionKey) {
+      const roomName = `transcript:${data.sessionKey}`;
+      this.server.to(roomName).emit('thinking_content', data);
+    }
+
+    // Also broadcast to user's channel
+    if (client.userId) {
+      this.server.to(`user:${client.userId}`).emit('thinking_content', data);
+    }
+
+    return { success: true };
+  }
+
+  // Device sends token usage
+  @SubscribeMessage('token_usage')
+  handleTokenUsage(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      sessionKey?: string;
+      usage: {
+        inputTokens: number;
+        outputTokens: number;
+      };
+    },
+  ) {
+    if (!client.deviceId && !client.sessionId) {
+      return { error: 'Not authenticated as device/session' };
+    }
+
+    // Broadcast to session room
+    if (data.sessionKey) {
+      const roomName = `transcript:${data.sessionKey}`;
+      this.server.to(roomName).emit('token_usage', data);
+    }
+
+    // Also broadcast to user's channel
+    if (client.userId) {
+      this.server.to(`user:${client.userId}`).emit('token_usage', data);
+    }
+
+    return { success: true };
+  }
+
+  // Device sends task progress
+  @SubscribeMessage('task_progress')
+  handleTaskProgress(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      sessionKey?: string;
+      type: 'created' | 'updated' | 'completed' | 'list';
+      task?: {
+        id: string;
+        subject: string;
+        status: 'pending' | 'in_progress' | 'completed';
+        activeForm?: string;
+      };
+      tasks?: Array<{
+        id: string;
+        subject: string;
+        status: 'pending' | 'in_progress' | 'completed';
+        activeForm?: string;
+      }>;
+    },
+  ) {
+    if (!client.deviceId && !client.sessionId) {
+      return { error: 'Not authenticated as device/session' };
+    }
+
+    // Broadcast to session room
+    if (data.sessionKey) {
+      const roomName = `transcript:${data.sessionKey}`;
+      this.server.to(roomName).emit('task_progress', data);
+    }
+
+    // Also broadcast to user's channel
+    if (client.userId) {
+      this.server.to(`user:${client.userId}`).emit('task_progress', data);
+    }
+
+    return { success: true };
+  }
+
   // ==================== RPC FORWARDING ====================
 
   // Mobile app calls RPC method on CLI session
