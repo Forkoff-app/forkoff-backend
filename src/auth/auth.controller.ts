@@ -2,8 +2,11 @@ import {
   Controller,
   Get,
   Patch,
+  Delete,
   Body,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -40,5 +43,14 @@ export class AuthController {
     @Body() data: { name?: string; avatarUrl?: string },
   ) {
     return this.authService.updateProfile(user.id, data);
+  }
+
+  @Delete('delete-account')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Delete current user account' })
+  @ApiResponse({ status: 204, description: 'Account deleted successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async deleteAccount(@CurrentUser() user: User) {
+    await this.authService.deleteAccount(user.id);
   }
 }
