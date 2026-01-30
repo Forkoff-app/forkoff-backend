@@ -38,12 +38,50 @@ export class AuthService {
 
   async updateProfile(
     userId: string,
-    data: { name?: string; avatarUrl?: string },
+    data: { name?: string; username?: string; avatarUrl?: string },
   ): Promise<User> {
     return this.prisma.user.update({
       where: { id: userId },
       data,
     });
+  }
+
+  validateUsername(username: string): { valid: boolean; error?: string } {
+    // Username must be 3-20 characters
+    if (username.length < 3) {
+      return { valid: false, error: 'Username must be at least 3 characters' };
+    }
+    if (username.length > 20) {
+      return { valid: false, error: 'Username must be at most 20 characters' };
+    }
+
+    // Username must start with a letter
+    if (!/^[a-zA-Z]/.test(username)) {
+      return { valid: false, error: 'Username must start with a letter' };
+    }
+
+    // Username can only contain letters, numbers, and underscores
+    if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(username)) {
+      return { valid: false, error: 'Username can only contain letters, numbers, and underscores' };
+    }
+
+    // Reserved usernames
+    const reserved = ['admin', 'root', 'system', 'forkoff', 'support', 'help', 'api', 'www'];
+    if (reserved.includes(username.toLowerCase())) {
+      return { valid: false, error: 'This username is reserved' };
+    }
+
+    return { valid: true };
+  }
+
+  async isUsernameAvailable(username: string, excludeUserId?: string): Promise<boolean> {
+    const existing = await this.prisma.user.findFirst({
+      where: {
+        username: { equals: username, mode: 'insensitive' },
+        ...(excludeUserId ? { NOT: { id: excludeUserId } } : {}),
+      },
+    });
+    return !existing;
   }
 
   async deleteAccount(userId: string): Promise<void> {

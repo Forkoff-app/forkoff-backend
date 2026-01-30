@@ -4,9 +4,11 @@ import {
   Patch,
   Delete,
   Body,
+  Param,
   UseGuards,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -38,11 +40,41 @@ export class AuthController {
   @ApiOperation({ summary: 'Update current user profile' })
   @ApiResponse({ status: 200, description: 'Profile updated successfully' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 400, description: 'Username already taken' })
   async updateProfile(
     @CurrentUser() user: User,
-    @Body() data: { name?: string; avatarUrl?: string },
+    @Body() data: { name?: string; username?: string; avatarUrl?: string },
   ) {
+    // Validate username if provided
+    if (data.username) {
+      const validation = this.authService.validateUsername(data.username);
+      if (!validation.valid) {
+        throw new BadRequestException(validation.error);
+      }
+
+      const available = await this.authService.isUsernameAvailable(data.username, user.id);
+      if (!available) {
+        throw new BadRequestException('Username is already taken');
+      }
+    }
+
     return this.authService.updateProfile(user.id, data);
+  }
+
+  @Get('username/check/:username')
+  @ApiOperation({ summary: 'Check if username is available' })
+  @ApiResponse({ status: 200, description: 'Returns availability status' })
+  async checkUsername(
+    @CurrentUser() user: User,
+    @Param('username') username: string,
+  ) {
+    const validation = this.authService.validateUsername(username);
+    if (!validation.valid) {
+      return { available: false, error: validation.error };
+    }
+
+    const available = await this.authService.isUsernameAvailable(username, user.id);
+    return { available, username };
   }
 
   @Delete('delete-account')

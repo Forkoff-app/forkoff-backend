@@ -15,6 +15,7 @@ datasource db {
 model User {
   id           String        @id @default(uuid())
   email        String        @unique
+  username     String?       @unique
   name         String?
   avatarUrl    String?
   subscription String        @default("free") // free, pro, team
