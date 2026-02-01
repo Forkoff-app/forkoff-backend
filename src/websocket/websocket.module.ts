@@ -7,6 +7,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { AnalyticsModule } from '../analytics/analytics.module';
 import { AchievementsModule } from '../achievements/achievements.module';
 import { PromptQueueModule } from '../prompt-queue/prompt-queue.module';
+import { SubscriptionModule } from '../subscription/subscription.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { PromptQueueModule } from '../prompt-queue/prompt-queue.module';
     AnalyticsModule,
     AchievementsModule,
     PromptQueueModule,
+    SubscriptionModule,
   ],
   providers: [WebsocketGateway],
   exports: [WebsocketGateway],

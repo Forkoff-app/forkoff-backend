@@ -33,6 +33,8 @@ model User {
   tokenUsageDaily  TokenUsageDaily[]
   achievements     UserAchievement[]
   queueSchedule    QueueSchedule?
+  subscriptionUsage SubscriptionUsage?
+  phoneSession     PhoneSession?
 
   @@map("users")
 }
@@ -378,4 +380,40 @@ model UserAchievement {
 
   @@unique([userId, achievementId])
   @@map("user_achievements")
+}
+
+// Subscription usage tracking
+model SubscriptionUsage {
+  id                     String   @id @default(uuid())
+  userId                 String   @unique
+
+  // Daily counters (reset at midnight UTC)
+  messagesUsedToday      Int      @default(0)
+  messageLimitResetAt    DateTime @default(now())
+
+  // Monthly counters (reset on 1st of month)
+  sessionsUsedThisMonth  Int      @default(0)
+  repairsUsedThisMonth   Int      @default(0)
+  monthlyLimitResetAt    DateTime @default(now())
+
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("subscription_usage")
+}
+
+// Active phone session tracking (Pro tier)
+model PhoneSession {
+  id           String   @id @default(uuid())
+  userId       String   @unique  // Only one per user
+  socketId     String
+  deviceInfo   String?  // Device name/model
+  connectedAt  DateTime @default(now())
+  lastActiveAt DateTime @default(now())
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("phone_sessions")
 }

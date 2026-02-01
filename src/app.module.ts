@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { DevicesModule } from './devices/devices.module';
@@ -15,6 +16,7 @@ import { GeoIpModule } from './geo-ip/geo-ip.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { AchievementsModule } from './achievements/achievements.module';
 import { PromptQueueModule } from './prompt-queue/prompt-queue.module';
+import { SubscriptionModule } from './subscription/subscription.module';
 
 @Module({
   imports: [
@@ -23,6 +25,9 @@ import { PromptQueueModule } from './prompt-queue/prompt-queue.module';
       isGlobal: true,
       envFilePath: '.env',
     }),
+
+    // Scheduling (for cron jobs)
+    ScheduleModule.forRoot(),
 
     // Database
     PrismaModule,
@@ -41,6 +46,7 @@ import { PromptQueueModule } from './prompt-queue/prompt-queue.module';
     AnalyticsModule,
     AchievementsModule,
     PromptQueueModule,
+    SubscriptionModule,
 
     // WebSocket
     WebsocketModule,

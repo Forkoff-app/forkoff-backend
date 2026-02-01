@@ -17,6 +17,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { AchievementCheckerService } from '../achievements/achievement-checker.service';
 import { PromptQueueService } from '../prompt-queue/prompt-queue.service';
+import { SubscriptionService } from '../subscription/subscription.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { DeviceStatus, MessageRole, ApprovalType } from '@prisma/client';
 
 interface AuthenticatedSocket extends Socket {
@@ -158,6 +160,8 @@ export class WebsocketGateway
     private analyticsService: AnalyticsService,
     private achievementCheckerService: AchievementCheckerService,
     private promptQueueService: PromptQueueService,
+    private subscriptionService: SubscriptionService,
+    private prisma: PrismaService,
   ) {
     const supabaseUrl = configService.get<string>('SUPABASE_URL');
     const supabaseServiceKey = configService.get<string>('SUPABASE_SERVICE_KEY');
@@ -205,8 +209,47 @@ export class WebsocketGateway
         }
       }
 
-      // Check connection type: session-scoped (CLI per session) or device-scoped (CLI per device)
+      // Handle phone session tracking for user-scoped (mobile) connections
       const clientType = client.handshake.auth?.clientType as 'user-scoped' | 'session-scoped' | undefined;
+      if (clientType === 'user-scoped' && client.userId) {
+        try {
+          // Check user's subscription tier
+          const user = await this.prisma.user.findUnique({
+            where: { id: client.userId },
+            select: { subscription: true },
+          });
+
+          if (user?.subscription === 'pro' || user?.subscription === 'team') {
+            // Check for existing phone session
+            const existingSession = await this.prisma.phoneSession.findUnique({
+              where: { userId: client.userId },
+            });
+
+            if (existingSession && existingSession.socketId !== client.id) {
+              // Emit conflict event to new connection
+              client.emit('phone_session_conflict', {
+                existingDeviceId: existingSession.deviceInfo,
+                message: 'Your account is active on another device',
+              });
+              this.logger.log(
+                `Phone session conflict for user ${client.userId}: existing socket ${existingSession.socketId}`,
+              );
+            } else {
+              // Register this phone session
+              await this.prisma.phoneSession.upsert({
+                where: { userId: client.userId },
+                update: { socketId: client.id, lastActiveAt: new Date() },
+                create: { userId: client.userId, socketId: client.id },
+              });
+              this.logger.log(`Phone session registered for user ${client.userId}`);
+            }
+          }
+        } catch (error) {
+          this.logger.error(`Error handling phone session: ${error}`);
+        }
+      }
+
+      // Get session/device info for CLI connections
       const sessionId = client.handshake.auth?.sessionId as string | undefined;
       const deviceId = client.handshake.auth?.deviceId;
       const authUserId = client.handshake.auth?.userId as string | undefined; // userId passed by CLI
@@ -491,6 +534,18 @@ export class WebsocketGateway
         `Device ${client.deviceId} disconnected (socket: ${client.id})`,
       );
     }
+
+    // Clean up phone session for user-scoped connections
+    if (client.userId && client.clientType === 'user-scoped') {
+      try {
+        await this.prisma.phoneSession.deleteMany({
+          where: { userId: client.userId, socketId: client.id },
+        });
+        this.logger.log(`Phone session cleaned up for user ${client.userId}`);
+      } catch (error) {
+        this.logger.error(`Failed to clean phone session: ${error}`);
+      }
+    }
   }
 
   // Mobile app subscribes to device updates
@@ -511,6 +566,50 @@ export class WebsocketGateway
   ) {
     client.leave(`device:${data.deviceId}`);
     return { success: true };
+  }
+
+  // Claim phone session (take over from another device)
+  @SubscribeMessage('claim_phone_session')
+  async handleClaimPhoneSession(
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    try {
+      const existingSession = await this.prisma.phoneSession.findUnique({
+        where: { userId: client.userId },
+      });
+
+      if (existingSession) {
+        // Disconnect the old session
+        const oldSocket = this.server.sockets.sockets.get(
+          existingSession.socketId,
+        );
+        if (oldSocket) {
+          oldSocket.emit('session_claimed', {
+            message: 'Session taken over by another device',
+          });
+          oldSocket.disconnect(true);
+        }
+      }
+
+      // Register new session
+      await this.prisma.phoneSession.upsert({
+        where: { userId: client.userId },
+        update: { socketId: client.id, lastActiveAt: new Date() },
+        create: { userId: client.userId, socketId: client.id },
+      });
+
+      this.logger.log(`Phone session claimed by user ${client.userId}`);
+      client.emit('claim_phone_session_result', { success: true });
+
+      return { success: true };
+    } catch (error) {
+      this.logger.error(`Failed to claim phone session: ${error}`);
+      return { error: 'Failed to claim session' };
+    }
   }
 
   // Map string status to DeviceStatus enum
@@ -834,12 +933,26 @@ export class WebsocketGateway
 
   // Mobile app sends user message to Claude session (SDK-based approach)
   @SubscribeMessage('user_message')
-  handleUserMessage(
+  async handleUserMessage(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: UserMessagePayload,
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+
+    // Check message limit
+    const result = await this.subscriptionService.recordMessageSent(
+      client.userId,
+    );
+    if (!result.allowed) {
+      client.emit('limit_reached', {
+        limitType: 'messages_daily',
+        currentUsage: result.currentUsage,
+        limit: result.limit,
+        resetAt: result.resetAt,
+      });
+      return { error: 'MESSAGE_LIMIT_REACHED' };
     }
 
     const payload = {

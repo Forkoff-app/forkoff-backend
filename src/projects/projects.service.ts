@@ -6,6 +6,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { Project } from '@prisma/client';
 import { CreateProjectDto, UpdateProjectDto } from './dto';
+import { SubscriptionService } from '../subscription/subscription.service';
 
 // Mock file tree structure for now (will be provided by CLI later)
 export interface FileNode {
@@ -18,7 +19,10 @@ export interface FileNode {
 
 @Injectable()
 export class ProjectsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private subscriptionService: SubscriptionService,
+  ) {}
 
   // Get all projects for a user
   async findAll(userId: string): Promise<Project[]> {
@@ -86,6 +90,14 @@ export class ProjectsService {
 
     if (!device) {
       throw new ForbiddenException('Device not found or not owned by user');
+    }
+
+    // Check project limit
+    const projectCount = await this.prisma.project.count({ where: { userId } });
+    const limits = await this.subscriptionService.getLimitsForUser(userId);
+
+    if (projectCount >= limits.maxProjects) {
+      throw new ForbiddenException('PROJECT_LIMIT_REACHED');
     }
 
     return this.prisma.project.create({
