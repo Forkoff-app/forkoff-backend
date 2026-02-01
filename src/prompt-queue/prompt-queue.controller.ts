@@ -56,6 +56,47 @@ export class PromptQueueController {
     return { count };
   }
 
+  // ==================== SCHEDULE ENDPOINTS ====================
+  // NOTE: These must come BEFORE the :id routes to avoid route conflicts
+
+  @Get('schedule')
+  @ApiOperation({ summary: "Get user's queue schedule" })
+  @ApiResponse({ status: 200, description: 'Returns schedule' })
+  async getSchedule(@CurrentUser() user: User) {
+    const schedule = await this.queueService.getSchedule(user.id);
+    return schedule || { enabled: false, scheduledTime: '09:00', daysOfWeek: [] };
+  }
+
+  @Patch('schedule')
+  @ApiOperation({ summary: 'Update queue schedule' })
+  @ApiResponse({ status: 200, description: 'Schedule updated' })
+  async updateSchedule(@CurrentUser() user: User, @Body() data: UpdateScheduleDto) {
+    return this.queueService.updateSchedule(user.id, data);
+  }
+
+  @Post('execute-next')
+  @ApiOperation({ summary: 'Trigger execution of next pending item' })
+  @ApiResponse({ status: 200, description: 'Execution triggered' })
+  async executeNext(@CurrentUser() user: User) {
+    const item = await this.queueService.getNextPendingItem(user.id);
+
+    if (!item) {
+      return { success: false, message: 'No pending items in queue' };
+    }
+
+    // Mark as executing (actual execution will be handled by the scheduler/websocket)
+    await this.queueService.markExecuting(item.id);
+
+    return {
+      success: true,
+      item,
+      message: 'Item marked for execution',
+    };
+  }
+
+  // ==================== PARAMETERIZED ROUTES ====================
+  // NOTE: These must come AFTER specific routes like /schedule, /count, /execute-next
+
   @Post()
   @ApiOperation({ summary: 'Add prompt to queue' })
   @ApiResponse({ status: 201, description: 'Prompt queued successfully' })
@@ -92,42 +133,5 @@ export class PromptQueueController {
   async cancelItem(@CurrentUser() user: User, @Param('id') id: string) {
     const item = await this.queueService.cancelItem(user.id, id);
     return { success: true, item };
-  }
-
-  @Post('execute-next')
-  @ApiOperation({ summary: 'Trigger execution of next pending item' })
-  @ApiResponse({ status: 200, description: 'Execution triggered' })
-  async executeNext(@CurrentUser() user: User) {
-    const item = await this.queueService.getNextPendingItem(user.id);
-
-    if (!item) {
-      return { success: false, message: 'No pending items in queue' };
-    }
-
-    // Mark as executing (actual execution will be handled by the scheduler/websocket)
-    await this.queueService.markExecuting(item.id);
-
-    return {
-      success: true,
-      item,
-      message: 'Item marked for execution',
-    };
-  }
-
-  // ==================== SCHEDULE ENDPOINTS ====================
-
-  @Get('schedule')
-  @ApiOperation({ summary: "Get user's queue schedule" })
-  @ApiResponse({ status: 200, description: 'Returns schedule' })
-  async getSchedule(@CurrentUser() user: User) {
-    const schedule = await this.queueService.getSchedule(user.id);
-    return schedule || { enabled: false, scheduledTime: '09:00', daysOfWeek: [] };
-  }
-
-  @Patch('schedule')
-  @ApiOperation({ summary: 'Update queue schedule' })
-  @ApiResponse({ status: 200, description: 'Schedule updated' })
-  async updateSchedule(@CurrentUser() user: User, @Body() data: UpdateScheduleDto) {
-    return this.queueService.updateSchedule(user.id, data);
   }
 }
