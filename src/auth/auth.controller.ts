@@ -5,6 +5,7 @@ import {
   Delete,
   Body,
   Param,
+  Req,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -16,7 +17,9 @@ import {
   ApiResponse,
   ApiBearerAuth,
 } from '@nestjs/swagger';
+import { Request } from 'express';
 import { AuthService } from './auth.service';
+import { AppConfigService } from '../app-config/app-config.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { User } from '@prisma/client';
@@ -26,14 +29,45 @@ import { User } from '@prisma/client';
 @Controller('auth')
 @UseGuards(JwtAuthGuard)
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private appConfigService: AppConfigService,
+  ) {}
 
   @Get('me')
-  @ApiOperation({ summary: 'Get current user profile' })
-  @ApiResponse({ status: 200, description: 'Returns the authenticated user profile' })
+  @ApiOperation({ summary: 'Get current user profile with app config' })
+  @ApiResponse({ status: 200, description: 'Returns the authenticated user profile and app config' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async getProfile(@CurrentUser() user: User) {
-    return this.authService.getProfile(user.id);
+  async getProfile(@CurrentUser() user: User, @Req() req: Request) {
+    // Extract IP for country detection
+    const ip = this.extractIp(req);
+    console.log(`[AuthController] /auth/me called for user ${user.id}, IP: ${ip}`);
+
+    // Update country if needed (async, don't wait)
+    this.authService.updateCountryFromIp(user.id, ip).catch((err) => {
+      console.error('Failed to update country:', err);
+    });
+
+    const [profile, versionConfig] = await Promise.all([
+      this.authService.getProfile(user.id),
+      this.appConfigService.getVersionConfig(),
+    ]);
+
+    return {
+      ...profile,
+      appConfig: versionConfig,
+    };
+  }
+
+  private extractIp(req: Request): string {
+    const forwardedFor = req.headers['x-forwarded-for'];
+    if (typeof forwardedFor === 'string') {
+      return forwardedFor.split(',')[0].trim();
+    }
+    if (Array.isArray(forwardedFor)) {
+      return forwardedFor[0];
+    }
+    return req.ip || '127.0.0.1';
   }
 
   @Patch('me')

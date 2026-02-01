@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { GeoIpService } from '../geo-ip/geo-ip.service';
 import { User } from '@prisma/client';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
@@ -8,7 +9,10 @@ export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private supabaseAdmin: SupabaseClient;
 
-  constructor(private prisma: PrismaService) {
+  constructor(
+    private prisma: PrismaService,
+    private geoIpService: GeoIpService,
+  ) {
     // Create Supabase admin client for user management
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
@@ -82,6 +86,38 @@ export class AuthService {
       },
     });
     return !existing;
+  }
+
+  async updateCountryFromIp(userId: string, ip: string): Promise<void> {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { country: true, countryUpdatedAt: true },
+      });
+
+      // Only update if country is not set or hasn't been updated in 24 hours
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      if (user?.country && user.countryUpdatedAt && user.countryUpdatedAt > twentyFourHoursAgo) {
+        return;
+      }
+
+      const country = await this.geoIpService.getCountryFromIp(ip);
+      if (!country) {
+        return;
+      }
+
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          country,
+          countryUpdatedAt: new Date(),
+        },
+      });
+
+      this.logger.log(`Updated country for user ${userId}: ${country}`);
+    } catch (error) {
+      this.logger.error(`Failed to update country for user ${userId}:`, error);
+    }
   }
 
   async deleteAccount(userId: string): Promise<void> {

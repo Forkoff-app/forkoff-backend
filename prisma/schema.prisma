@@ -13,14 +13,16 @@ datasource db {
 
 // User model - synced with Supabase Auth
 model User {
-  id           String        @id @default(uuid())
-  email        String        @unique
-  username     String?       @unique
-  name         String?
-  avatarUrl    String?
-  subscription String        @default("free") // free, pro, team
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  id               String        @id @default(uuid())
+  email            String        @unique
+  username         String?       @unique
+  name             String?
+  avatarUrl        String?
+  subscription     String        @default("free") // free, pro, team
+  country          String?
+  countryUpdatedAt DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
   // Relations
   devices      Device[]
@@ -274,4 +276,16 @@ model PushToken {
   @@unique([userId, token])
   @@index([userId])
   @@map("push_tokens")
+}
+
+// App configuration (min version, feature flags, etc.)
+model AppConfig {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       Json
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("app_config")
 }

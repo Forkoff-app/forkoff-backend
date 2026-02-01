@@ -10,6 +10,8 @@ import { GithubModule } from './github/github.module';
 import { WebsocketModule } from './websocket/websocket.module';
 import { ClaudeSessionsModule } from './claude-sessions/claude-sessions.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { AppConfigModule } from './app-config/app-config.module';
+import { GeoIpModule } from './geo-ip/geo-ip.module';
 
 @Module({
   imports: [
@@ -31,6 +33,8 @@ import { NotificationsModule } from './notifications/notifications.module';
     GithubModule,
     ClaudeSessionsModule,
     NotificationsModule,
+    AppConfigModule,
+    GeoIpModule,
 
     // WebSocket
     WebsocketModule,
