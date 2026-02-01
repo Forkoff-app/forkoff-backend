@@ -21,13 +21,18 @@ model User {
   subscription     String        @default("free") // free, pro, team
   country          String?
   countryUpdatedAt DateTime?
+  timezone         String?       @default("UTC")
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
   // Relations
-  devices      Device[]
-  projects     Project[]
-  chatSessions ChatSession[]
+  devices          Device[]
+  projects         Project[]
+  chatSessions     ChatSession[]
+  promptQueue      PromptQueueItem[]
+  tokenUsageDaily  TokenUsageDaily[]
+  achievements     UserAchievement[]
+  queueSchedule    QueueSchedule?
 
   @@map("users")
 }
@@ -288,4 +293,89 @@ model AppConfig {
   updatedAt   DateTime @updatedAt
 
   @@map("app_config")
+}
+
+// Prompt Queue Item - for queuing prompts during rate limits
+model PromptQueueItem {
+  id              String    @id @default(uuid())
+  userId          String
+  deviceId        String
+  sessionKey      String?
+  prompt          String
+  status          String    @default("PENDING") // PENDING, SCHEDULED, EXECUTING, COMPLETED, FAILED, CANCELLED
+  priority        Int       @default(0)
+  rateLimitReason String?
+  retryAfter      DateTime?
+  scheduledFor    DateTime?
+  executedAt      DateTime?
+  errorMessage    String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([scheduledFor])
+  @@map("prompt_queue_items")
+}
+
+// Queue Schedule Configuration (user's local time preferences)
+model QueueSchedule {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  enabled       Boolean  @default(false)
+  scheduledTime String   // HH:mm format in user's timezone
+  daysOfWeek    Int[]    // 0=Sunday, 1=Monday, etc. Empty = every day
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("queue_schedules")
+}
+
+// Daily Token Usage Aggregation
+model TokenUsageDaily {
+  id               String   @id @default(uuid())
+  userId           String
+  date             DateTime @db.Date
+  inputTokens      BigInt   @default(0)
+  outputTokens     BigInt   @default(0)
+  sessionCount     Int      @default(0)
+  estimatedCostUsd Decimal? @db.Decimal(10, 4)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@map("token_usage_daily")
+}
+
+// Achievement Definitions (seeded)
+model Achievement {
+  id               String            @id @default(uuid())
+  key              String            @unique // e.g., "tokens_1m", "sessions_100"
+  name             String
+  description      String
+  category         String            // TOKENS, SESSIONS, ENGAGEMENT, SPECIAL
+  iconName         String            // Lucide icon name
+  tier             String            // BRONZE, SILVER, GOLD, PLATINUM, DIAMOND
+  threshold        BigInt
+  createdAt        DateTime          @default(now())
+  userAchievements UserAchievement[]
+
+  @@map("achievements")
+}
+
+// User's earned achievements
+model UserAchievement {
+  id            String      @id @default(uuid())
+  userId        String
+  achievementId String
+  unlockedAt    DateTime    @default(now())
+  progress      BigInt      @default(0)
+  showcased     Boolean     @default(false)
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, achievementId])
+  @@map("user_achievements")
 }

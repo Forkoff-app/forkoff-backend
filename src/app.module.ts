@@ -12,6 +12,9 @@ import { ClaudeSessionsModule } from './claude-sessions/claude-sessions.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { AppConfigModule } from './app-config/app-config.module';
 import { GeoIpModule } from './geo-ip/geo-ip.module';
+import { AnalyticsModule } from './analytics/analytics.module';
+import { AchievementsModule } from './achievements/achievements.module';
+import { PromptQueueModule } from './prompt-queue/prompt-queue.module';
 
 @Module({
   imports: [
@@ -35,6 +38,9 @@ import { GeoIpModule } from './geo-ip/geo-ip.module';
     NotificationsModule,
     AppConfigModule,
     GeoIpModule,
+    AnalyticsModule,
+    AchievementsModule,
+    PromptQueueModule,
 
     // WebSocket
     WebsocketModule,

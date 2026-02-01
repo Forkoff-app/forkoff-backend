@@ -4,9 +4,20 @@ import { DevicesModule } from '../devices/devices.module';
 import { AuthModule } from '../auth/auth.module';
 import { ClaudeSessionsModule } from '../claude-sessions/claude-sessions.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { AnalyticsModule } from '../analytics/analytics.module';
+import { AchievementsModule } from '../achievements/achievements.module';
+import { PromptQueueModule } from '../prompt-queue/prompt-queue.module';
 
 @Module({
-  imports: [DevicesModule, AuthModule, ClaudeSessionsModule, NotificationsModule],
+  imports: [
+    DevicesModule,
+    AuthModule,
+    ClaudeSessionsModule,
+    NotificationsModule,
+    AnalyticsModule,
+    AchievementsModule,
+    PromptQueueModule,
+  ],
   providers: [WebsocketGateway],
   exports: [WebsocketGateway],
 })

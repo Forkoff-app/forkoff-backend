@@ -14,6 +14,9 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { DevicesService } from '../devices/devices.service';
 import { ClaudeSessionsService } from '../claude-sessions/claude-sessions.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { AnalyticsService } from '../analytics/analytics.service';
+import { AchievementCheckerService } from '../achievements/achievement-checker.service';
+import { PromptQueueService } from '../prompt-queue/prompt-queue.service';
 import { DeviceStatus, MessageRole, ApprovalType } from '@prisma/client';
 
 interface AuthenticatedSocket extends Socket {
@@ -152,6 +155,9 @@ export class WebsocketGateway
     private devicesService: DevicesService,
     private claudeSessionsService: ClaudeSessionsService,
     private notificationsService: NotificationsService,
+    private analyticsService: AnalyticsService,
+    private achievementCheckerService: AchievementCheckerService,
+    private promptQueueService: PromptQueueService,
   ) {
     const supabaseUrl = configService.get<string>('SUPABASE_URL');
     const supabaseServiceKey = configService.get<string>('SUPABASE_SERVICE_KEY');
@@ -1651,7 +1657,7 @@ export class WebsocketGateway
 
   // Device sends token usage
   @SubscribeMessage('token_usage')
-  handleTokenUsage(
+  async handleTokenUsage(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: {
       sessionKey?: string;
@@ -1660,7 +1666,7 @@ export class WebsocketGateway
         outputTokens: number;
       };
     },
-  ) {
+  ): Promise<{ success: true } | { error: string }> {
     if (!client.deviceId && !client.sessionId) {
       return { error: 'Not authenticated as device/session' };
     }
@@ -1674,6 +1680,32 @@ export class WebsocketGateway
     // Also broadcast to user's channel
     if (client.userId) {
       this.server.to(`user:${client.userId}`).emit('token_usage', data);
+
+      // Record token usage in analytics
+      try {
+        await this.analyticsService.recordTokenUsage(client.userId, {
+          sessionId: data.sessionKey,
+          inputTokens: data.usage.inputTokens,
+          outputTokens: data.usage.outputTokens,
+        });
+
+        // Check for achievement unlocks
+        const unlockedAchievements = await this.achievementCheckerService.checkTokenAchievements(client.userId);
+
+        // Emit achievement_unlocked events for any new achievements
+        for (const unlocked of unlockedAchievements) {
+          this.server.to(`user:${client.userId}`).emit('achievement_unlocked', {
+            achievement: {
+              ...unlocked.achievement,
+              threshold: unlocked.achievement.threshold.toString(),
+            },
+            unlockedAt: unlocked.userAchievement.unlockedAt,
+          });
+          this.logger.log(`Achievement unlocked: ${unlocked.achievement.key} for user ${client.userId}`);
+        }
+      } catch (error) {
+        this.logger.error(`Failed to record token usage: ${error}`);
+      }
     }
 
     return { success: true };
@@ -2042,5 +2074,142 @@ export class WebsocketGateway
     }
 
     return { success: true };
+  }
+
+  // ==================== RATE LIMIT & QUEUE EVENTS ====================
+
+  // CLI reports rate limit detected
+  @SubscribeMessage('rate_limit_detected')
+  async handleRateLimitDetected(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      deviceId: string;
+      sessionKey?: string;
+      prompt: string;
+      rateLimitReason?: string;
+      retryAfter?: string; // ISO date string
+    },
+  ): Promise<{ success: true; queueItemId?: string } | { error: string }> {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    this.logger.log(`Rate limit detected for user ${client.userId}: ${data.rateLimitReason}`);
+
+    try {
+      // Queue the prompt
+      const queueItem = await this.promptQueueService.queuePrompt(client.userId, {
+        deviceId: data.deviceId,
+        sessionKey: data.sessionKey,
+        prompt: data.prompt,
+        rateLimitReason: data.rateLimitReason,
+        retryAfter: data.retryAfter ? new Date(data.retryAfter) : undefined,
+      });
+
+      // Notify user's mobile app
+      this.server.to(`user:${client.userId}`).emit('prompt_queued', {
+        queueItemId: queueItem.id,
+        deviceId: data.deviceId,
+        sessionKey: data.sessionKey,
+        prompt: data.prompt.substring(0, 100) + (data.prompt.length > 100 ? '...' : ''),
+        rateLimitReason: data.rateLimitReason,
+        retryAfter: data.retryAfter,
+        createdAt: queueItem.createdAt.toISOString(),
+      });
+
+      return { success: true, queueItemId: queueItem.id };
+    } catch (error) {
+      this.logger.error(`Failed to queue prompt: ${error}`);
+      return { error: 'Failed to queue prompt' };
+    }
+  }
+
+  // Mobile triggers queue item execution
+  @SubscribeMessage('execute_queue_item')
+  async handleExecuteQueueItem(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      queueItemId: string;
+    },
+  ): Promise<{ success: true } | { error: string }> {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    try {
+      const item = await this.promptQueueService.getQueueItem(client.userId, data.queueItemId);
+
+      // Mark as executing
+      await this.promptQueueService.markExecuting(item.id);
+
+      // Emit to user's CLIs
+      this.server.to(`user:${client.userId}`).emit('queue_item_executing', {
+        queueItemId: item.id,
+        deviceId: item.deviceId,
+        sessionKey: item.sessionKey,
+        prompt: item.prompt,
+      });
+
+      // Also try to send directly to the session if connected
+      if (item.sessionKey && this.isSessionConnected(item.sessionKey)) {
+        this.sendToSession(item.sessionKey, 'queue_item_executing', {
+          queueItemId: item.id,
+          prompt: item.prompt,
+        });
+      } else if (item.deviceId && this.isDeviceOnline(item.deviceId)) {
+        this.sendToDevice(item.deviceId, 'queue_item_executing', {
+          queueItemId: item.id,
+          sessionKey: item.sessionKey,
+          prompt: item.prompt,
+        });
+      }
+
+      return { success: true };
+    } catch (error) {
+      this.logger.error(`Failed to execute queue item: ${error}`);
+      return { error: 'Failed to execute queue item' };
+    }
+  }
+
+  // CLI reports queue item execution completed
+  @SubscribeMessage('queue_item_completed')
+  async handleQueueItemCompleted(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      queueItemId: string;
+      success: boolean;
+      errorMessage?: string;
+    },
+  ): Promise<{ success: true } | { error: string }> {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    try {
+      if (data.success) {
+        await this.promptQueueService.markCompleted(data.queueItemId);
+      } else {
+        await this.promptQueueService.markFailed(data.queueItemId, data.errorMessage);
+      }
+
+      // Notify user's mobile app
+      this.server.to(`user:${client.userId}`).emit('queue_item_executed', {
+        queueItemId: data.queueItemId,
+        success: data.success,
+        errorMessage: data.errorMessage,
+        executedAt: new Date().toISOString(),
+      });
+
+      // Also emit queue update
+      const pendingCount = await this.promptQueueService.getPendingCount(client.userId);
+      this.server.to(`user:${client.userId}`).emit('queue_updated', {
+        pendingCount,
+      });
+
+      return { success: true };
+    } catch (error) {
+      this.logger.error(`Failed to mark queue item completed: ${error}`);
+      return { error: 'Failed to update queue item' };
+    }
   }
 }
