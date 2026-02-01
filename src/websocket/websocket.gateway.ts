@@ -2167,7 +2167,8 @@ export class WebsocketGateway
       return { success: true };
     } catch (error) {
       this.logger.error(`Failed to execute queue item: ${error}`);
-      return { error: 'Failed to execute queue item' };
+      const message = error instanceof Error ? error.message : 'Failed to execute queue item';
+      return { error: message };
     }
   }
 
