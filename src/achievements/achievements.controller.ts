@@ -14,6 +14,7 @@ import {
   ApiParam,
 } from '@nestjs/swagger';
 import { AchievementsService } from './achievements.service';
+import { AnalyticsService } from '../analytics/analytics.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { User } from '@prisma/client';
@@ -21,7 +22,10 @@ import { User } from '@prisma/client';
 @ApiTags('achievements')
 @Controller('achievements')
 export class AchievementsController {
-  constructor(private readonly achievementsService: AchievementsService) {}
+  constructor(
+    private readonly achievementsService: AchievementsService,
+    private readonly analyticsService: AnalyticsService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'Get all achievement definitions' })
@@ -42,8 +46,24 @@ export class AchievementsController {
   @ApiOperation({ summary: 'Get achievements with user progress' })
   @ApiResponse({ status: 200, description: 'Returns achievements with user progress' })
   async getAchievementsWithProgress(@CurrentUser() user: User) {
+    // Fetch current stats for progress calculation
+    const [totalTokens, totalSessions, activeDays, currentStreak] = await Promise.all([
+      this.analyticsService.getTotalTokens(user.id),
+      this.analyticsService.getTotalSessionCount(user.id),
+      this.analyticsService.getActiveDaysCount(user.id),
+      this.analyticsService.getCurrentStreak(user.id),
+    ]);
+
+    const currentStats = {
+      totalTokens,
+      totalSessions,
+      activeDays,
+      currentStreak,
+    };
+
     const achievements = await this.achievementsService.getAchievementsWithProgress(
       user.id,
+      currentStats,
     );
 
     // Convert BigInt to string for JSON serialization

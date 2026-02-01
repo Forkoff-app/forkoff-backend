@@ -128,9 +128,17 @@ export class AchievementsService {
   }
 
   /**
-   * Get all achievements with user progress
+   * Get all achievements with user progress (including progress towards locked achievements)
    */
-  async getAchievementsWithProgress(userId: string): Promise<AchievementWithProgress[]> {
+  async getAchievementsWithProgress(
+    userId: string,
+    currentStats?: {
+      totalTokens: bigint;
+      totalSessions: number;
+      activeDays: number;
+      currentStreak: number;
+    },
+  ): Promise<AchievementWithProgress[]> {
     const [achievements, userAchievements] = await Promise.all([
       this.prisma.achievement.findMany({
         orderBy: [{ category: 'asc' }, { threshold: 'asc' }],
@@ -146,6 +154,23 @@ export class AchievementsService {
 
     return achievements.map((achievement) => {
       const userAchievement = userAchievementMap.get(achievement.id);
+
+      // Calculate current progress for this achievement based on its category
+      let currentProgress = BigInt(0);
+      if (currentStats) {
+        if (achievement.category === 'TOKENS') {
+          currentProgress = currentStats.totalTokens;
+        } else if (achievement.category === 'SESSIONS') {
+          currentProgress = BigInt(currentStats.totalSessions);
+        } else if (achievement.category === 'ENGAGEMENT') {
+          if (achievement.key.startsWith('days_active_')) {
+            currentProgress = BigInt(currentStats.activeDays);
+          } else if (achievement.key.startsWith('streak_')) {
+            currentProgress = BigInt(currentStats.currentStreak);
+          }
+        }
+      }
+
       return {
         ...achievement,
         userProgress: userAchievement
@@ -154,7 +179,13 @@ export class AchievementsService {
               progress: userAchievement.progress,
               showcased: userAchievement.showcased,
             }
-          : undefined,
+          : currentStats
+            ? {
+                unlockedAt: null,
+                progress: currentProgress,
+                showcased: false,
+              }
+            : undefined,
       };
     });
   }
