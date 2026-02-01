@@ -1,168 +1,279 @@
-# ForkOff API
+<p align="center">
+  <img src="assets/logo.png" alt="ForkOff Logo" width="200"/>
+</p>
 
-Backend API for the ForkOff mobile app with real-time WebSocket support.
+<h1 align="center">ForkOff Backend</h1>
+
+<p align="center">
+  <strong>Real-time API server powering the ForkOff ecosystem</strong>
+</p>
+
+<p align="center">
+  <a href="#features">Features</a> •
+  <a href="#tech-stack">Tech Stack</a> •
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#api-reference">API Reference</a> •
+  <a href="#websocket-events">WebSocket</a>
+</p>
+
+---
+
+## Features
+
+- 🔐 **Secure Authentication** - JWT-based auth via Supabase
+- 📡 **Real-time Communication** - WebSocket support for instant updates
+- 📱 **Device Management** - Pair and manage multiple development machines
+- 💬 **Claude Session Handling** - Manage AI coding sessions across devices
+- 📊 **Analytics & Tracking** - Token usage, session history, achievements
+- 🔔 **Push Notifications** - Expo push notifications for mobile alerts
+- ⏰ **Prompt Queue** - Queue and schedule prompts during rate limits
+
+---
 
 ## Tech Stack
 
-- **Framework**: NestJS
-- **Database**: PostgreSQL (Supabase)
-- **ORM**: Prisma
-- **WebSocket**: Socket.io
-- **Auth**: JWT (Supabase tokens)
+| Technology | Purpose |
+|------------|---------|
+| **NestJS** | Backend framework |
+| **PostgreSQL** | Database (via Supabase) |
+| **Prisma** | ORM & database toolkit |
+| **Socket.io** | Real-time WebSocket communication |
+| **Supabase** | Auth & database hosting |
+| **Swagger** | API documentation |
 
-## Setup
+---
 
-### 1. Install Dependencies
+## Quick Start
+
+### Prerequisites
+
+- Node.js 18+
+- Supabase account with a project
+
+### 1. Clone & Install
 
 ```bash
+git clone https://github.com/Forkoff-app/forkoff-backend.git
+cd forkoff-backend
 npm install
 ```
 
 ### 2. Configure Environment
 
-Copy `.env.example` to `.env` and fill in your Supabase credentials:
-
 ```bash
 cp .env.example .env
 ```
 
-You'll need:
-- **DATABASE_URL**: From Supabase > Project Settings > Database > Connection string (pooling)
-- **DIRECT_URL**: From Supabase > Project Settings > Database > Connection string (direct)
-- **JWT_SECRET**: From Supabase > Project Settings > API > JWT Secret
+Edit `.env` with your Supabase credentials:
 
-### 3. Push Database Schema
+| Variable | Where to Find |
+|----------|---------------|
+| `DATABASE_URL` | Supabase → Project Settings → Database → Connection string (pooling) |
+| `DIRECT_URL` | Supabase → Project Settings → Database → Connection string (direct) |
+| `SUPABASE_URL` | Supabase → Project Settings → API → Project URL |
+| `SUPABASE_ANON_KEY` | Supabase → Project Settings → API → anon public |
+| `SUPABASE_SERVICE_KEY` | Supabase → Project Settings → API → service_role |
+| `JWT_SECRET` | Supabase → Project Settings → API → JWT Secret |
+
+### 3. Setup Database
 
 ```bash
+# Push schema to database
 npm run db:push
+
+# Seed achievements (optional)
+npm run db:seed
 ```
 
-This creates the tables in your Supabase PostgreSQL database.
-
-### 4. Start the Server
+### 4. Start Server
 
 ```bash
-# Development (with hot reload)
+# Development (hot reload)
 npm run start:dev
 
 # Production
-npm run build
-npm run start:prod
+npm run build && npm run start:prod
 ```
 
-The API will be available at `http://localhost:3000`.
+Server runs at `http://localhost:3000`
 
-## API Endpoints
+📚 **API Docs**: `http://localhost:3000/docs`
+
+---
+
+## API Reference
 
 ### Authentication
-All endpoints (except device registration) require a Bearer token from Supabase Auth.
 
-```
+All endpoints require a Bearer token (except device registration):
+
+```http
 Authorization: Bearer <supabase-jwt-token>
 ```
 
-### Devices
+### Core Endpoints
+
+#### Devices
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | /api/devices | List all devices for user |
-| GET | /api/devices/:id | Get single device |
-| POST | /api/devices | Create device directly |
-| POST | /api/devices/register | Generate pairing code (from CLI) |
-| POST | /api/devices/pair | Pair device with code (from mobile) |
-| PATCH | /api/devices/:id | Update device (rename) |
-| DELETE | /api/devices/:id | Remove device |
-| POST | /api/devices/:id/refresh | Refresh device status |
+| `GET` | `/api/devices` | List user's devices |
+| `GET` | `/api/devices/:id` | Get device details |
+| `POST` | `/api/devices/register` | Generate pairing code (CLI) |
+| `POST` | `/api/devices/pair` | Pair with code (mobile) |
+| `PATCH` | `/api/devices/:id` | Update device |
+| `DELETE` | `/api/devices/:id` | Remove device |
 
-### User Profile
+#### Claude Sessions
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | /api/auth/me | Get current user profile |
-| PATCH | /api/auth/me | Update user profile |
+| `GET` | `/api/claude-sessions/device/:deviceId` | Get sessions for device |
+| `GET` | `/api/claude-sessions/:sessionId` | Get session details |
+| `DELETE` | `/api/claude-sessions/:sessionId` | Delete session |
+
+#### Prompt Queue
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/queue` | Get queued prompts |
+| `POST` | `/api/queue` | Add prompt to queue |
+| `DELETE` | `/api/queue/:id` | Cancel queued prompt |
+| `GET` | `/api/queue/schedule` | Get queue schedule |
+| `PATCH` | `/api/queue/schedule` | Update schedule |
+
+#### Analytics
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/analytics/usage` | Get usage summary |
+| `GET` | `/api/analytics/daily` | Get daily breakdown |
+| `GET` | `/api/achievements` | List all achievements |
+| `GET` | `/api/achievements/user` | Get user's achievements |
+
+---
 
 ## WebSocket Events
 
-Connect to `ws://localhost:3000` with the Supabase JWT token.
-
-### Client -> Server
+Connect to `ws://localhost:3000` with authentication:
 
 ```typescript
-// Authenticate (sent in handshake)
-{ auth: { token: 'jwt-token' } }
+import { io } from 'socket.io-client';
 
-// Subscribe to device updates
-socket.emit('subscribe_device', { deviceId: 'device-id' });
-
-// Unsubscribe from device updates
-socket.emit('unsubscribe_device', { deviceId: 'device-id' });
-```
-
-### Server -> Client
-
-```typescript
-// Device status changed
-socket.on('device_status', (data) => {
-  // { deviceId: string, status: 'ONLINE' | 'OFFLINE' | 'SYNCING' }
-});
-```
-
-### Device (CLI) Events
-
-When connecting from a CLI tool on a computer:
-
-```typescript
-// Connect with device ID
 const socket = io('ws://localhost:3000', {
-  auth: { deviceId: 'device-id' }
+  auth: { token: 'your-jwt-token' }
 });
-
-// Send heartbeat
-socket.emit('device_heartbeat', { status: 'ONLINE' });
-
-// Report syncing status
-socket.emit('device_syncing', { syncing: true });
 ```
+
+### Mobile App Events
+
+| Event | Direction | Description |
+|-------|-----------|-------------|
+| `device_status` | Server → Client | Device online/offline status |
+| `claude_message` | Server → Client | AI response streaming |
+| `claude_approval_request` | Server → Client | Permission request from CLI |
+| `achievement_unlocked` | Server → Client | New achievement earned |
+| `prompt_queued` | Server → Client | Prompt added to queue |
+
+### CLI Events
+
+| Event | Direction | Description |
+|-------|-----------|-------------|
+| `claude_session_update` | CLI → Server | Session state changed |
+| `user_message` | Server → CLI | Message from mobile app |
+| `claude_approval_response` | Server → CLI | Approval decision |
+
+---
 
 ## Device Pairing Flow
 
-1. **On Computer (CLI)**:
-   - Call `POST /api/devices/register` with device info
-   - Display the returned pairing code as QR code
-   - Connect to WebSocket with device ID
+```
+┌─────────────┐                    ┌─────────────┐                    ┌─────────────┐
+│     CLI     │                    │   Server    │                    │  Mobile App │
+└──────┬──────┘                    └──────┬──────┘                    └──────┬──────┘
+       │                                  │                                  │
+       │ POST /devices/register           │                                  │
+       │─────────────────────────────────>│                                  │
+       │                                  │                                  │
+       │ { pairingCode: "ABC123" }        │                                  │
+       │<─────────────────────────────────│                                  │
+       │                                  │                                  │
+       │ Display QR Code                  │                                  │
+       │                                  │                                  │
+       │                                  │     POST /devices/pair           │
+       │                                  │<─────────────────────────────────│
+       │                                  │                                  │
+       │                                  │     { device: {...} }            │
+       │                                  │─────────────────────────────────>│
+       │                                  │                                  │
+       │ WebSocket: device_paired         │                                  │
+       │<─────────────────────────────────│                                  │
+       │                                  │                                  │
+```
 
-2. **On Mobile App**:
-   - Scan QR code to get pairing code
-   - Call `POST /api/devices/pair` with the code
-   - Device is now linked to user's account
+---
 
 ## Development
 
+### Database Commands
+
 ```bash
-# Generate Prisma client after schema changes
+# Generate Prisma client
 npm run db:generate
 
-# Push schema changes to database
+# Push schema changes
 npm run db:push
+
+# Open Prisma Studio
+npm run db:studio
 
 # Create migration
 npm run db:migrate
-
-# Open Prisma Studio (database viewer)
-npm run db:studio
 ```
 
-## Testing with Mobile App
+### Testing with Mobile App
 
-1. Get your computer's local IP address:
+1. Get your local IP:
    - Windows: `ipconfig`
-   - Mac/Linux: `ifconfig`
+   - macOS/Linux: `ifconfig` or `ip addr`
 
-2. Update the mobile app's `.env`:
+2. Update mobile app `.env`:
    ```
    EXPO_PUBLIC_API_URL=http://YOUR_IP:3000/api
    EXPO_PUBLIC_WS_URL=ws://YOUR_IP:3000
-   EXPO_PUBLIC_USE_MOCKS=false
    ```
 
-3. Start the API server and mobile app together.
+3. Start both servers
+
+---
+
+## Project Structure
+
+```
+src/
+├── auth/           # Authentication module
+├── devices/        # Device management
+├── claude-sessions/# Claude session handling
+├── chat/           # Chat sessions
+├── terminal/       # Terminal sessions
+├── prompt-queue/   # Queue management
+├── analytics/      # Usage analytics
+├── achievements/   # Gamification
+├── notifications/  # Push notifications
+├── websocket/      # WebSocket gateway
+└── prisma/         # Database client
+```
+
+---
+
+## Related Projects
+
+- [ForkOff Mobile App](https://github.com/Forkoff-app/forkoff-react-native) - React Native app
+- [ForkOff CLI](https://github.com/Forkoff-app/forkoff-cli) - Command line tool
+- [ForkOff Website](https://github.com/Forkoff-app/forkoff-website) - Landing page
+
+---
+
+<p align="center">
+  Made with ❤️ by the ForkOff team
+</p>
