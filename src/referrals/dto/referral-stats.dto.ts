@@ -10,8 +10,11 @@ export class ReferralStatsDto {
   @ApiProperty({ description: 'Number of reward months available to claim' })
   rewardMonthsAvailable: number;
 
-  @ApiProperty({ description: 'Progress towards next reward (0-2)' })
+  @ApiProperty({ description: 'Progress towards next reward tier' })
   nextRewardProgress: number;
+
+  @ApiProperty({ description: 'Conversions needed for next reward (increases each tier: 3, 6, 9, ...)' })
+  nextRewardTarget: number;
 }
 
 export class ReferralCodeResponseDto {

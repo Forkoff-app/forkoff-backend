@@ -10,8 +10,36 @@ import {
 } from './dto';
 
 // Referral reward constants
-const CONVERSIONS_PER_REWARD = 3;
+const BASE_CONVERSIONS = 3; // First tier requires 3 conversions
 const REWARD_MONTHS = 1;
+
+/**
+ * Calculate total conversions needed for N reward months (gamified tiers)
+ * Tier 1: 3, Tier 2: 6 more (9 total), Tier 3: 9 more (18 total), etc.
+ * Formula: 3 * n * (n + 1) / 2
+ */
+function getConversionsNeededForMonths(months: number): number {
+  return (BASE_CONVERSIONS * months * (months + 1)) / 2;
+}
+
+/**
+ * Calculate how many reward months earned from total conversions
+ * Inverse of the above formula
+ */
+function getMonthsEarnedFromConversions(conversions: number): number {
+  if (conversions < BASE_CONVERSIONS) return 0;
+  // Solve: 3 * n * (n + 1) / 2 <= conversions
+  // n = floor((-1 + sqrt(1 + 8 * conversions / 3)) / 2)
+  const n = Math.floor((-1 + Math.sqrt(1 + (8 * conversions) / BASE_CONVERSIONS)) / 2);
+  return n;
+}
+
+/**
+ * Get conversions needed for the next tier
+ */
+function getConversionsForNextTier(currentMonths: number): number {
+  return BASE_CONVERSIONS * (currentMonths + 1);
+}
 
 @Injectable()
 export class ReferralsService {
@@ -190,12 +218,21 @@ export class ReferralsService {
         },
       });
 
-      // Check if we should grant a reward (every 3 conversions)
-      if (updatedProfile.successfulReferrals % CONVERSIONS_PER_REWARD === 0) {
+      // Calculate rewards using gamified tier system
+      // Tier 1: 3 conversions, Tier 2: 9 total, Tier 3: 18 total, etc.
+      const previousMonthsEarned = getMonthsEarnedFromConversions(
+        updatedProfile.successfulReferrals - 1,
+      );
+      const newMonthsEarned = getMonthsEarnedFromConversions(
+        updatedProfile.successfulReferrals,
+      );
+
+      // Check if this conversion unlocked a new reward tier
+      if (newMonthsEarned > previousMonthsEarned) {
         await tx.referralProfile.update({
           where: { id: referral.referrerProfileId },
           data: {
-            rewardMonthsEarned: { increment: REWARD_MONTHS },
+            rewardMonthsEarned: newMonthsEarned,
           },
         });
 
@@ -205,7 +242,7 @@ export class ReferralsService {
         });
 
         this.logger.log(
-          `User ${referral.referrerProfile.userId} earned ${REWARD_MONTHS} reward month(s) from referrals`,
+          `User ${referral.referrerProfile.userId} earned reward month #${newMonthsEarned} from referrals (${updatedProfile.successfulReferrals} total conversions)`,
         );
       }
     });
@@ -324,12 +361,21 @@ export class ReferralsService {
     rewardMonthsEarned: number;
     rewardMonthsClaimed: number;
   }): ReferralStatsDto {
+    const currentMonthsEarned = getMonthsEarnedFromConversions(
+      profile.successfulReferrals,
+    );
+    const conversionsForCurrentTier = getConversionsNeededForMonths(currentMonthsEarned);
+    const conversionsForNextTier = getConversionsNeededForMonths(currentMonthsEarned + 1);
+    const conversionsNeededForNext = conversionsForNextTier - conversionsForCurrentTier;
+    const progressInCurrentTier = profile.successfulReferrals - conversionsForCurrentTier;
+
     return {
       totalReferrals: profile.totalReferrals,
       successfulConversions: profile.successfulReferrals,
       rewardMonthsAvailable:
         profile.rewardMonthsEarned - profile.rewardMonthsClaimed,
-      nextRewardProgress: profile.successfulReferrals % CONVERSIONS_PER_REWARD,
+      nextRewardProgress: progressInCurrentTier,
+      nextRewardTarget: conversionsNeededForNext,
     };
   }
 }
