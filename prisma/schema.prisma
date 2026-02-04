@@ -19,6 +19,8 @@ model User {
   name             String?
   avatarUrl        String?
   subscription     String        @default("free") // free, pro, team
+  proExpiresAt     DateTime?     // When PRO subscription expires (for voucher/referral benefits)
+  isLifetimePro    Boolean       @default(false) // Permanent PRO access from lifetime voucher
   country          String?
   countryUpdatedAt DateTime?
   timezone         String?       @default("UTC")
@@ -35,6 +37,9 @@ model User {
   queueSchedule    QueueSchedule?
   subscriptionUsage SubscriptionUsage?
   phoneSession     PhoneSession?
+  voucherRedemptions VoucherRedemption[]
+  referralProfile  ReferralProfile?
+  referredBy       Referral?     @relation("ReferredUser")
 
   @@map("users")
 }
@@ -271,6 +276,19 @@ enum ApprovalStatus {
   REJECTED
 }
 
+// Voucher system enums
+enum VoucherType {
+  LIFETIME_PRO  // Permanent PRO access
+  CAMPAIGN      // Limited redemptions (e.g., 200 users)
+  SINGLE_USE    // One-time randomly generated
+}
+
+enum VoucherBenefitType {
+  FREE_MONTHS      // X months of PRO
+  LIFETIME_PRO     // Permanent PRO
+  DISCOUNT_PERCENT // Future payment integration
+}
+
 // Push notification tokens for mobile devices
 model PushToken {
   id        String   @id @default(uuid())
@@ -425,4 +443,80 @@ model Waitlist {
   createdAt DateTime @default(now())
 
   @@map("waitlist")
+}
+
+// Voucher definition
+model Voucher {
+  id                 String             @id @default(uuid())
+  code               String             @unique
+  type               VoucherType
+  benefitType        VoucherBenefitType
+  benefitValue       Int                @default(0) // Months for FREE_MONTHS, percentage for DISCOUNT
+  maxRedemptions     Int?               // null = unlimited
+  currentRedemptions Int                @default(0)
+  validFrom          DateTime           @default(now())
+  validUntil         DateTime?          // null = never expires
+  campaignName       String?
+  description        String?
+  isActive           Boolean            @default(true)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  redemptions        VoucherRedemption[]
+
+  @@index([code])
+  @@index([isActive])
+  @@map("vouchers")
+}
+
+// Voucher redemption record
+model VoucherRedemption {
+  id               String             @id @default(uuid())
+  voucherId        String
+  userId           String
+  benefitType      VoucherBenefitType
+  benefitValue     Int
+  benefitExpiresAt DateTime?          // When the benefit expires (for FREE_MONTHS)
+  redeemedAt       DateTime           @default(now())
+  voucher          Voucher            @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([voucherId, userId])
+  @@index([userId])
+  @@map("voucher_redemptions")
+}
+
+// User's referral profile
+model ReferralProfile {
+  id                  String     @id @default(uuid())
+  userId              String     @unique
+  referralCode        String     @unique
+  totalReferrals      Int        @default(0)
+  successfulReferrals Int        @default(0)
+  rewardMonthsEarned  Int        @default(0)
+  rewardMonthsClaimed Int        @default(0)
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+  user                User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  referrals           Referral[] @relation("ReferrerProfile")
+
+  @@index([referralCode])
+  @@map("referral_profiles")
+}
+
+// Individual referral record
+model Referral {
+  id                String          @id @default(uuid())
+  referrerProfileId String
+  referredUserId    String          @unique
+  signedUpAt        DateTime        @default(now())
+  convertedAt       DateTime?
+  isConverted       Boolean         @default(false)
+  rewardGranted     Boolean         @default(false)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  referrerProfile   ReferralProfile @relation("ReferrerProfile", fields: [referrerProfileId], references: [id], onDelete: Cascade)
+  referredUser      User            @relation("ReferredUser", fields: [referredUserId], references: [id], onDelete: Cascade)
+
+  @@index([referrerProfileId])
+  @@map("referrals")
 }

@@ -68,11 +68,92 @@ export class SubscriptionService {
   async getLimitsForUser(userId: string): Promise<SubscriptionLimits> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { subscription: true },
+      select: { subscription: true, isLifetimePro: true, proExpiresAt: true },
     });
+
+    // Check if user has active PRO status (from vouchers/referrals)
+    const hasActivePro = await this.checkProStatus(userId);
+    if (hasActivePro && user?.subscription === 'free') {
+      // User has PRO from voucher/referral but subscription field is 'free'
+      return getLimitsForTier('pro');
+    }
 
     const tier = (user?.subscription || 'free') as SubscriptionTier;
     return getLimitsForTier(tier);
+  }
+
+  /**
+   * Check if user has active PRO status (from subscription, voucher, or referral)
+   * Returns true if user should be treated as PRO
+   */
+  async checkProStatus(userId: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        subscription: true,
+        isLifetimePro: true,
+        proExpiresAt: true,
+      },
+    });
+
+    if (!user) {
+      return false;
+    }
+
+    // Check if user has lifetime PRO
+    if (user.isLifetimePro) {
+      return true;
+    }
+
+    // Check if user has active PRO subscription
+    if (user.subscription === 'pro' || user.subscription === 'team') {
+      return true;
+    }
+
+    // Check if user has unexpired PRO from voucher/referral
+    if (user.proExpiresAt && user.proExpiresAt > new Date()) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Auto-downgrade expired PRO users (call from cron or when checking status)
+   */
+  async autoDowngradeExpiredPro(userId: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        subscription: true,
+        isLifetimePro: true,
+        proExpiresAt: true,
+      },
+    });
+
+    if (!user) {
+      return;
+    }
+
+    // Don't downgrade lifetime PRO users
+    if (user.isLifetimePro) {
+      return;
+    }
+
+    // Check if PRO has expired
+    if (
+      user.subscription === 'pro' &&
+      user.proExpiresAt &&
+      user.proExpiresAt <= new Date()
+    ) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          subscription: 'free',
+        },
+      });
+      this.logger.log(`User ${userId} auto-downgraded from PRO (expired)`);
+    }
   }
 
   /**

@@ -17,6 +17,8 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { AchievementsModule } from './achievements/achievements.module';
 import { PromptQueueModule } from './prompt-queue/prompt-queue.module';
 import { SubscriptionModule } from './subscription/subscription.module';
+import { VouchersModule } from './vouchers/vouchers.module';
+import { ReferralsModule } from './referrals/referrals.module';
 
 @Module({
   imports: [
@@ -47,6 +49,8 @@ import { SubscriptionModule } from './subscription/subscription.module';
     AchievementsModule,
     PromptQueueModule,
     SubscriptionModule,
+    VouchersModule,
+    ReferralsModule,
 
     // WebSocket
     WebsocketModule,
