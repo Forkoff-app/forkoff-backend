@@ -417,3 +417,12 @@ model PhoneSession {
 
   @@map("phone_sessions")
 }
+
+// Waitlist for pre-launch signups
+model Waitlist {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  createdAt DateTime @default(now())
+
+  @@map("waitlist")
+}
