@@ -52,47 +52,52 @@ async function bootstrap() {
     exclude: ['health'],
   });
 
-  // Swagger documentation
-  const config = new DocumentBuilder()
-    .setTitle('ForkOff API')
-    .setDescription(
-      'API for ForkOff - Mobile companion app for AI-powered coding tools',
-    )
-    .setVersion('1.0')
-    .addBearerAuth(
-      {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
-        name: 'Authorization',
-        description: 'Enter Supabase JWT token',
-        in: 'header',
-      },
-      'supabase-auth',
-    )
-    .addTag('health', 'Health check endpoint')
-    .addTag('auth', 'Authentication & user profile')
-    .addTag('devices', 'Device management & pairing')
-    .addTag('projects', 'Project management')
-    .addTag('chat', 'Chat sessions & messages')
-    .addTag('terminal', 'Remote terminal sessions')
-    .addTag('github', 'GitHub integration')
-    .build();
+  // Swagger documentation - only in development
+  const nodeEnv = configService.get<string>('NODE_ENV') || 'development';
+  if (nodeEnv !== 'production' && nodeEnv !== 'Prod') {
+    const config = new DocumentBuilder()
+      .setTitle('ForkOff API')
+      .setDescription(
+        'API for ForkOff - Mobile companion app for AI-powered coding tools',
+      )
+      .setVersion('1.0')
+      .addBearerAuth(
+        {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+          name: 'Authorization',
+          description: 'Enter Supabase JWT token',
+          in: 'header',
+        },
+        'supabase-auth',
+      )
+      .addTag('health', 'Health check endpoint')
+      .addTag('auth', 'Authentication & user profile')
+      .addTag('devices', 'Device management & pairing')
+      .addTag('projects', 'Project management')
+      .addTag('chat', 'Chat sessions & messages')
+      .addTag('terminal', 'Remote terminal sessions')
+      .addTag('github', 'GitHub integration')
+      .build();
 
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('docs', app, document, {
-    swaggerOptions: {
-      persistAuthorization: true,
-    },
-  });
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('docs', app, document, {
+      swaggerOptions: {
+        persistAuthorization: true,
+      },
+    });
+  }
 
   const port = configService.get<number>('PORT') || 3000;
   server = await app.listen(port);
 
-  console.log(`🚀 ForkOff API running on http://localhost:${port}`);
-  console.log(`📚 Swagger docs at http://localhost:${port}/docs`);
-  console.log(`📡 WebSocket available on ws://localhost:${port}`);
-  console.log(`💚 Health check at http://localhost:${port}/health`);
+  console.log(`ForkOff API running on http://localhost:${port}`);
+  if (nodeEnv !== 'production' && nodeEnv !== 'Prod') {
+    console.log(`Swagger docs at http://localhost:${port}/docs`);
+  }
+  console.log(`WebSocket available on ws://localhost:${port}`);
+  console.log(`Health check at http://localhost:${port}/health`);
 
   // Store app reference for graceful shutdown
   return app;
