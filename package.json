@@ -24,6 +24,7 @@
   "license": "MIT",
   "description": "ForkOff Backend API with WebSocket support",
   "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.984.0",
     "@nestjs/common": "^11.1.12",
     "@nestjs/config": "^4.0.2",
     "@nestjs/core": "^11.1.12",

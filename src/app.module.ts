@@ -19,6 +19,7 @@ import { PromptQueueModule } from './prompt-queue/prompt-queue.module';
 import { SubscriptionModule } from './subscription/subscription.module';
 import { VouchersModule } from './vouchers/vouchers.module';
 import { ReferralsModule } from './referrals/referrals.module';
+import { HealthModule } from './health/health.module';
 
 @Module({
   imports: [
@@ -54,6 +55,9 @@ import { ReferralsModule } from './referrals/referrals.module';
 
     // WebSocket
     WebsocketModule,
+
+    // Health check
+    HealthModule,
   ],
 })
 export class AppModule {}

@@ -4,8 +4,15 @@ import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Request, Response, NextFunction } from 'express';
 import { AppModule } from './app.module';
+import { loadSecrets } from './config/secrets';
+
+// Store server reference for graceful shutdown
+let server: any;
 
 async function bootstrap() {
+  // Load secrets from AWS Secrets Manager before anything else
+  await loadSecrets();
+
   const app = await NestFactory.create(AppModule);
   const logger = new Logger('HTTP');
 
@@ -40,8 +47,10 @@ async function bootstrap() {
     }),
   );
 
-  // Global prefix for all routes
-  app.setGlobalPrefix('api');
+  // Global prefix for all routes (except health check)
+  app.setGlobalPrefix('api', {
+    exclude: ['health'],
+  });
 
   // Swagger documentation
   const config = new DocumentBuilder()
@@ -61,6 +70,7 @@ async function bootstrap() {
       },
       'supabase-auth',
     )
+    .addTag('health', 'Health check endpoint')
     .addTag('auth', 'Authentication & user profile')
     .addTag('devices', 'Device management & pairing')
     .addTag('projects', 'Project management')
@@ -77,11 +87,51 @@ async function bootstrap() {
   });
 
   const port = configService.get<number>('PORT') || 3000;
-  await app.listen(port);
+  server = await app.listen(port);
 
   console.log(`🚀 ForkOff API running on http://localhost:${port}`);
   console.log(`📚 Swagger docs at http://localhost:${port}/docs`);
   console.log(`📡 WebSocket available on ws://localhost:${port}`);
+  console.log(`💚 Health check at http://localhost:${port}/health`);
+
+  // Store app reference for graceful shutdown
+  return app;
 }
+
+// Graceful shutdown handler
+async function gracefulShutdown(signal: string) {
+  console.log(`\n⚠️  Received ${signal}. Starting graceful shutdown...`);
+
+  if (server) {
+    // Stop accepting new connections
+    server.close(() => {
+      console.log('✅ HTTP server closed');
+      process.exit(0);
+    });
+
+    // Force exit after 10 seconds if server doesn't close gracefully
+    setTimeout(() => {
+      console.error('❌ Forcing shutdown after 10 seconds');
+      process.exit(1);
+    }, 10000);
+  } else {
+    process.exit(0);
+  }
+}
+
+// Register shutdown handlers
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  gracefulShutdown('uncaughtException');
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 bootstrap();
