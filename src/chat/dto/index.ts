@@ -1,4 +1,4 @@
-import { IsString, IsEnum, IsOptional, IsUUID } from 'class-validator';
+import { IsString, IsEnum, IsOptional, IsUUID, MaxLength } from 'class-validator';
 import { ToolType, MessageRole, ApprovalType, ApprovalStatus } from '@prisma/client';
 
 // Create Chat Session
@@ -11,6 +11,7 @@ export class CreateChatSessionDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   title?: string;
 }
 
@@ -18,6 +19,7 @@ export class CreateChatSessionDto {
 export class UpdateChatSessionDto {
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   title?: string;
 }
 
@@ -27,6 +29,7 @@ export class CreateMessageDto {
   role: MessageRole;
 
   @IsString()
+  @MaxLength(50000)
   content: string;
 }
 
@@ -36,9 +39,10 @@ export class CreateApprovalRequestDto {
   type: ApprovalType;
 
   @IsString()
+  @MaxLength(2000)
   description: string;
 
-  changes: any; // JSON array of code changes
+  changes: any;
 }
 
 // Respond to Approval Request

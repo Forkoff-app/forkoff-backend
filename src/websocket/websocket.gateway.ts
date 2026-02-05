@@ -9,6 +9,7 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { ConfigService } from '@nestjs/config';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { DevicesService } from '../devices/devices.service';
@@ -130,9 +131,12 @@ interface ClaudeMessagePayload {
   };
 }
 
+@SkipThrottle()
 @WebSocketGateway({
   cors: {
-    origin: '*', // Configure properly in production
+    origin: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'Prod'
+      ? (process.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()) || false)
+      : true,
   },
   namespace: '/',
 })

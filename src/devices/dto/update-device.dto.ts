@@ -1,7 +1,8 @@
-import { IsString, IsOptional } from 'class-validator';
+import { IsString, IsOptional, MaxLength } from 'class-validator';
 
 export class UpdateDeviceDto {
   @IsString()
   @IsOptional()
+  @MaxLength(100)
   name?: string;
 }

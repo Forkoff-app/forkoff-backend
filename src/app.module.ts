@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { DevicesModule } from './devices/devices.module';
@@ -22,6 +24,12 @@ import { ReferralsModule } from './referrals/referrals.module';
 import { HealthModule } from './health/health.module';
 
 @Module({
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+  ],
   imports: [
     // Configuration
     ConfigModule.forRoot({
@@ -31,6 +39,25 @@ import { HealthModule } from './health/health.module';
 
     // Scheduling (for cron jobs)
     ScheduleModule.forRoot(),
+
+    // Rate limiting - 100 requests per 60 seconds per IP
+    ThrottlerModule.forRoot([
+      {
+        name: 'short',
+        ttl: 1000, // 1 second
+        limit: 10, // 10 requests per second
+      },
+      {
+        name: 'medium',
+        ttl: 60000, // 1 minute
+        limit: 100, // 100 requests per minute
+      },
+      {
+        name: 'long',
+        ttl: 3600000, // 1 hour
+        limit: 1000, // 1000 requests per hour
+      },
+    ]),
 
     // Database
     PrismaModule,

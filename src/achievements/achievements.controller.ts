@@ -16,6 +16,7 @@ import {
 import { AchievementsService } from './achievements.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { AdminGuard } from '../auth/guards/admin.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { User } from '@prisma/client';
 
@@ -142,8 +143,11 @@ export class AchievementsController {
   }
 
   @Post('seed')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @ApiBearerAuth('supabase-auth')
   @ApiOperation({ summary: 'Seed achievement definitions (admin only)' })
   @ApiResponse({ status: 200, description: 'Achievements seeded' })
+  @ApiResponse({ status: 403, description: 'Admin access required' })
   async seedAchievements() {
     await this.achievementsService.seedAchievements();
     return { success: true, message: 'Achievements seeded' };

@@ -19,6 +19,7 @@ import {
   ApiParam,
   ApiQuery,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { DevicesService } from './devices.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -76,6 +77,7 @@ export class DevicesController {
   }
 
   @Post('register')
+  @Throttle({ short: { limit: 3, ttl: 1000 }, medium: { limit: 10, ttl: 60000 } })
   @ApiOperation({ summary: 'Register a device and get a pairing code (called from CLI)' })
   @ApiResponse({ status: 201, description: 'Returns pairing code and expiry time' })
   async register(@Body() data: RegisterDeviceDto) {
@@ -150,7 +152,8 @@ export class DevicesController {
   }
 
   @Post(':id/tools')
-  @ApiOperation({ summary: 'Report connected tools from CLI (no auth required)' })
+  @Throttle({ short: { limit: 5, ttl: 1000 }, medium: { limit: 20, ttl: 60000 } })
+  @ApiOperation({ summary: 'Report connected tools from CLI' })
   @ApiParam({ name: 'id', description: 'Device UUID' })
   @ApiResponse({ status: 200, description: 'Tools updated successfully' })
   async reportTools(

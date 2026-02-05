@@ -1,11 +1,13 @@
 import { Controller, Get } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 
 interface HealthResponse {
   status: string;
   timestamp: string;
 }
 
+@SkipThrottle()
 @Controller()
 @ApiTags('health')
 export class HealthController {

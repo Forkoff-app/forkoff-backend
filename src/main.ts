@@ -28,11 +28,18 @@ async function bootstrap() {
 
   // Get config service
   const configService = app.get(ConfigService);
+  const nodeEnv = configService.get<string>('NODE_ENV') || 'development';
 
   // Enable CORS for mobile app
+  const isProduction = nodeEnv === 'production' || nodeEnv === 'Prod';
+  const allowedOrigins = configService.get<string>('ALLOWED_ORIGINS')?.split(',').map(o => o.trim()) || [];
   app.enableCors({
-    origin: true, // Allow all origins in development
+    origin: isProduction
+      ? (allowedOrigins.length > 0 ? allowedOrigins : false)
+      : true,
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
   // Global validation pipe
@@ -53,7 +60,6 @@ async function bootstrap() {
   });
 
   // Swagger documentation - only in development
-  const nodeEnv = configService.get<string>('NODE_ENV') || 'development';
   if (nodeEnv !== 'production' && nodeEnv !== 'Prod') {
     const config = new DocumentBuilder()
       .setTitle('ForkOff API')

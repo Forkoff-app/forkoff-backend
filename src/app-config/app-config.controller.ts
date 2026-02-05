@@ -13,6 +13,7 @@ import {
 } from '@nestjs/swagger';
 import { AppConfigService, VersionConfig } from './app-config.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { AdminGuard } from '../auth/guards/admin.guard';
 
 @ApiTags('app-config')
 @Controller('app-config')
@@ -27,24 +28,24 @@ export class AppConfigController {
   }
 
   @Put('version')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AdminGuard)
   @ApiBearerAuth('supabase-auth')
   @ApiOperation({ summary: 'Update version configuration (admin only)' })
   @ApiResponse({ status: 200, description: 'Version config updated' })
+  @ApiResponse({ status: 403, description: 'Admin access required' })
   async setVersionConfig(
     @Body() config: Partial<VersionConfig>,
   ): Promise<VersionConfig> {
-    // TODO: Add admin role check
     return this.appConfigService.setVersionConfig(config);
   }
 
   @Get()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AdminGuard)
   @ApiBearerAuth('supabase-auth')
   @ApiOperation({ summary: 'Get all app configurations (admin only)' })
   @ApiResponse({ status: 200, description: 'Returns all configs' })
+  @ApiResponse({ status: 403, description: 'Admin access required' })
   async getAllConfigs(): Promise<Record<string, any>> {
-    // TODO: Add admin role check
     return this.appConfigService.getAllConfigs();
   }
 }

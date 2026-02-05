@@ -13,6 +13,8 @@ interface SecretPayload {
   NODE_ENV?: string;
   PORT?: string;
   PAIRING_CODE_EXPIRY_MINUTES?: string;
+  ADMIN_EMAILS?: string;
+  ALLOWED_ORIGINS?: string;
 }
 
 const SECRET_NAME = 'forkoff-api';
