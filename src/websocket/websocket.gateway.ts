@@ -1143,7 +1143,7 @@ export class WebsocketGateway
 
   // Claude session update from device
   @SubscribeMessage('claude_session_update')
-  async handleClaudeSessionUpdate(
+  handleClaudeSessionUpdate(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -1181,20 +1181,10 @@ export class WebsocketGateway
       deviceId: deviceId,
     };
 
-    // Try to upsert session in DB, but don't block broadcast on failure
-    try {
-      const session = await this.claudeSessionsService.upsertSession(
-        deviceId,
-        data,
-      );
-      // Use DB-saved session data if available
-      Object.assign(sessionData, session);
-    } catch (error) {
-      // Log but don't throw - still broadcast the update
-      this.logger.warn(`Failed to save session to DB (broadcasting anyway): ${error}`);
-    }
+    // Buffer the DB write — flushed in batch on next cycle
+    this.claudeSessionsService.bufferSessionUpsert(deviceId, data);
 
-    // Broadcast to device subscribers (mobile subscribes via subscribeToDevice)
+    // Broadcast to device subscribers immediately (mobile subscribes via subscribeToDevice)
     this.server.to(`device:${deviceId}`).emit('claude_session_update', sessionData);
 
     return { success: true };
@@ -1216,6 +1206,52 @@ export class WebsocketGateway
     });
 
     return { success: true };
+  }
+
+  // Batch session update from CLI (replaces N individual events with 1)
+  @SubscribeMessage('claude_session_batch_update')
+  handleClaudeSessionBatchUpdate(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody()
+    data: {
+      sessions: Array<{
+        sessionKey: string;
+        deviceId?: string;
+        directory: string;
+        state: 'active' | 'inactive' | 'suspended';
+        lastUsedAt?: string;
+        transcriptPath?: string;
+      }>;
+    },
+  ) {
+    const deviceId = client.deviceId || data.sessions?.[0]?.deviceId;
+    if (!deviceId) {
+      return { error: 'Not authenticated as device' };
+    }
+
+    if (!client.deviceId && data.sessions?.[0]?.deviceId) {
+      client.deviceId = data.sessions[0].deviceId;
+      client.isDevice = true;
+    }
+
+    this.logger.log(`Received claude_session_batch_update: ${data.sessions?.length ?? 0} sessions`);
+
+    for (const session of data.sessions ?? []) {
+      // Buffer for batched DB write
+      this.claudeSessionsService.bufferSessionUpsert(deviceId, session);
+
+      // Broadcast each individually — mobile expects individual events
+      this.server.to(`device:${deviceId}`).emit('claude_session_update', {
+        sessionKey: session.sessionKey,
+        directory: session.directory,
+        state: session.state,
+        lastUsedAt: session.lastUsedAt || new Date().toISOString(),
+        transcriptPath: session.transcriptPath,
+        deviceId,
+      });
+    }
+
+    return { success: true, count: data.sessions?.length ?? 0 };
   }
 
   // ==================== DIRECTORY LISTING EVENTS ====================
@@ -1685,10 +1721,10 @@ export class WebsocketGateway
 
   // Device sends Claude message (from SDK streaming)
   @SubscribeMessage('claude_message')
-  async handleClaudeMessage(
+  handleClaudeMessage(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: ClaudeMessagePayload,
-  ): Promise<{ success: true } | { error: string }> {
+  ): { success: true } | { error: string } {
     if (!client.deviceId) {
       return { error: 'Not authenticated as device' };
     }
@@ -1701,24 +1737,20 @@ export class WebsocketGateway
     // Broadcast to mobile clients
     this.server.to(roomName).emit('claude_message', data);
 
-    // Store message in database (only for non-partial, completed messages)
+    // Buffer message for batched DB write (only for non-partial, completed messages)
     if (data.message && !data.message.partial && data.message.id) {
-      try {
-        await this.claudeSessionsService.storeMessage(
-          data.deviceId,
-          data.sessionKey,
-          {
-            messageId: data.message.id,
-            type: data.message.type,
-            content: data.message.content,
-            toolName: data.message.toolName,
-            toolInput: data.message.toolInput,
-            isError: data.message.isError,
-          },
-        );
-      } catch (error) {
-        this.logger.error(`Failed to store message: ${error}`);
-      }
+      this.claudeSessionsService.bufferMessageStore(
+        data.deviceId,
+        data.sessionKey,
+        {
+          messageId: data.message.id,
+          type: data.message.type,
+          content: data.message.content,
+          toolName: data.message.toolName,
+          toolInput: data.message.toolInput,
+          isError: data.message.isError,
+        },
+      );
     }
 
     return { success: true };

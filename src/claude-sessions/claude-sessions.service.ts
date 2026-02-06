@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ClaudeSession, ClaudeSessionState, ClaudeSessionMessage } from '@prisma/client';
 
@@ -20,9 +20,205 @@ export interface StoreMessageDto {
   isError?: boolean;
 }
 
+interface BufferedSession {
+  deviceId: string;
+  data: UpsertSessionDto;
+  receivedAt: number;
+}
+
+interface BufferedMessage {
+  deviceId: string;
+  sessionKey: string;
+  data: StoreMessageDto;
+}
+
+const FLUSH_INTERVAL_MS = 2_000;
+const MAX_BUFFER_SIZE = 50;
+const MAX_CACHE_SIZE = 1_000;
+
 @Injectable()
-export class ClaudeSessionsService {
-  constructor(private prisma: PrismaService) {}
+export class ClaudeSessionsService implements OnModuleDestroy {
+  private readonly logger = new Logger(ClaudeSessionsService.name);
+
+  // Write buffers — keyed for last-write-wins dedup
+  private sessionBuffer = new Map<string, BufferedSession>();
+  private messageBuffer = new Map<string, BufferedMessage>();
+
+  // Cache: `${deviceId}:${sessionKey}` → Prisma row id
+  private sessionIdCache = new Map<string, string>();
+
+  private flushTimer: NodeJS.Timeout;
+  private isFlushing = false;
+
+  constructor(private prisma: PrismaService) {
+    this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+  }
+
+  async onModuleDestroy() {
+    clearInterval(this.flushTimer);
+    await this.flush();
+  }
+
+  // ==================== BUFFERED WRITES ====================
+
+  /** Queue a session upsert — will be flushed in the next batch cycle. */
+  bufferSessionUpsert(deviceId: string, data: UpsertSessionDto): void {
+    const key = `${deviceId}:${data.sessionKey}`;
+    this.sessionBuffer.set(key, { deviceId, data, receivedAt: Date.now() });
+
+    if (this.sessionBuffer.size >= MAX_BUFFER_SIZE) {
+      void this.flush();
+    }
+  }
+
+  /** Queue a message store — will be flushed in the next batch cycle. */
+  bufferMessageStore(deviceId: string, sessionKey: string, data: StoreMessageDto): void {
+    const key = `${deviceId}:${sessionKey}:${data.messageId}`;
+    this.messageBuffer.set(key, { deviceId, sessionKey, data });
+
+    if (this.messageBuffer.size >= MAX_BUFFER_SIZE) {
+      void this.flush();
+    }
+  }
+
+  /** Flush all pending buffers to DB. */
+  private async flush(): Promise<void> {
+    if (this.isFlushing) return;
+    if (this.sessionBuffer.size === 0 && this.messageBuffer.size === 0) return;
+
+    this.isFlushing = true;
+    try {
+      await this.flushSessionBuffer();
+      await this.flushMessageBuffer();
+    } catch (error) {
+      this.logger.error(`Flush error: ${error}`);
+    } finally {
+      this.isFlushing = false;
+    }
+  }
+
+  private async flushSessionBuffer(): Promise<void> {
+    if (this.sessionBuffer.size === 0) return;
+
+    // Snapshot and clear so new writes go to a fresh buffer
+    const entries = [...this.sessionBuffer.values()];
+    this.sessionBuffer.clear();
+
+    this.logger.log(`Flushing ${entries.length} session upserts`);
+
+    const ops = entries.map(({ deviceId, data }) => {
+      const state = this.mapState(data.state);
+      const lastUsedAt = data.lastUsedAt ? new Date(data.lastUsedAt) : new Date();
+
+      const updateData: any = { state, lastUsedAt };
+      if (data.transcriptPath !== undefined) updateData.transcriptPath = data.transcriptPath;
+      if (data.claudeSessionId !== undefined) updateData.claudeSessionId = data.claudeSessionId;
+
+      return this.prisma.claudeSession.upsert({
+        where: { deviceId_sessionKey: { deviceId, sessionKey: data.sessionKey } },
+        update: updateData,
+        create: {
+          deviceId,
+          sessionKey: data.sessionKey,
+          directory: data.directory,
+          state,
+          lastUsedAt,
+          transcriptPath: data.transcriptPath,
+          claudeSessionId: data.claudeSessionId,
+        },
+      });
+    });
+
+    try {
+      const results = await this.prisma.$transaction(ops);
+
+      // Populate session ID cache from results
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        const entry = entries[i];
+        const cacheKey = `${entry.deviceId}:${entry.data.sessionKey}`;
+        this.sessionIdCache.set(cacheKey, result.id);
+      }
+
+      // Evict cache if too large
+      if (this.sessionIdCache.size > MAX_CACHE_SIZE) {
+        this.sessionIdCache.clear();
+      }
+    } catch (error) {
+      this.logger.error(`Session flush transaction failed: ${error}`);
+    }
+  }
+
+  private async flushMessageBuffer(): Promise<void> {
+    if (this.messageBuffer.size === 0) return;
+
+    // Snapshot and clear
+    const entries = [...this.messageBuffer.values()];
+    this.messageBuffer.clear();
+
+    this.logger.log(`Flushing ${entries.length} message stores`);
+
+    // Resolve session IDs — try cache first, batch-lookup fallback
+    const missingKeys = new Set<string>();
+    for (const { deviceId, sessionKey } of entries) {
+      const cacheKey = `${deviceId}:${sessionKey}`;
+      if (!this.sessionIdCache.has(cacheKey)) {
+        missingKeys.add(cacheKey);
+      }
+    }
+
+    if (missingKeys.size > 0) {
+      // Batch lookup all missing session IDs
+      const lookupPromises = [...missingKeys].map(async (key) => {
+        const [deviceId, sessionKey] = key.split(':');
+        const session = await this.getSessionByKey(deviceId, sessionKey);
+        if (session) {
+          this.sessionIdCache.set(key, session.id);
+        }
+      });
+      await Promise.all(lookupPromises);
+    }
+
+    // Build upsert operations for messages that have a resolved session ID
+    const ops: ReturnType<typeof this.prisma.claudeSessionMessage.upsert>[] = [];
+    for (const { deviceId, sessionKey, data } of entries) {
+      const cacheKey = `${deviceId}:${sessionKey}`;
+      const sessionId = this.sessionIdCache.get(cacheKey);
+      if (!sessionId) {
+        this.logger.warn(`Skipping message ${data.messageId}: session not found for ${cacheKey}`);
+        continue;
+      }
+
+      ops.push(
+        this.prisma.claudeSessionMessage.upsert({
+          where: { sessionId_messageId: { sessionId, messageId: data.messageId } },
+          update: {
+            content: data.content,
+            toolName: data.toolName,
+            toolInput: data.toolInput,
+            isError: data.isError ?? false,
+          },
+          create: {
+            sessionId,
+            messageId: data.messageId,
+            type: data.type,
+            content: data.content,
+            toolName: data.toolName,
+            toolInput: data.toolInput,
+            isError: data.isError ?? false,
+          },
+        }),
+      );
+    }
+
+    if (ops.length > 0) {
+      try {
+        await this.prisma.$transaction(ops);
+      } catch (error) {
+        this.logger.error(`Message flush transaction failed: ${error}`);
+      }
+    }
+  }
 
   // Map string state to ClaudeSessionState enum
   private mapState(state: string): ClaudeSessionState {
