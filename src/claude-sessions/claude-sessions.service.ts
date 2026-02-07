@@ -111,6 +111,7 @@ export class ClaudeSessionsService implements OnModuleDestroy {
       const lastUsedAt = data.lastUsedAt ? new Date(data.lastUsedAt) : new Date();
 
       const updateData: any = { state, lastUsedAt };
+      if (data.directory !== undefined) updateData.directory = data.directory;
       if (data.transcriptPath !== undefined) updateData.transcriptPath = data.transcriptPath;
       if (data.claudeSessionId !== undefined) updateData.claudeSessionId = data.claudeSessionId;
 
@@ -247,6 +248,9 @@ export class ClaudeSessionsService implements OnModuleDestroy {
       state,
       lastUsedAt,
     };
+    if (data.directory !== undefined) {
+      updateData.directory = data.directory;
+    }
     if (data.transcriptPath !== undefined) {
       updateData.transcriptPath = data.transcriptPath;
     }
