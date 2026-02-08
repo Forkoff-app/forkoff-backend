@@ -143,6 +143,18 @@ interface ClaudeMessagePayload {
 export class WebsocketGateway
   implements OnGatewayConnection, OnGatewayDisconnect
 {
+  afterInit() {
+    // When a session gets auto-named from its first user message,
+    // broadcast the name to mobile clients so the UI updates in real-time.
+    this.claudeSessionsService.onSessionNamed((deviceId, sessionKey, name) => {
+      this.server.to(`device:${deviceId}`).emit('claude_session_update', {
+        deviceId,
+        sessionKey,
+        name,
+      });
+    });
+  }
+
   @WebSocketServer()
   server: Server;
 
@@ -1693,6 +1705,20 @@ export class WebsocketGateway
     // Broadcast to all subscribers of this transcript
     this.server.to(`transcript:${data.sessionKey}`).emit('transcript_history', data);
 
+    // Auto-set session name from the first user message in history
+    if (client.deviceId && data.entries?.length > 0) {
+      const firstUserEntry = data.entries.find(
+        (e) => e.type === 'user' && e.content?.text,
+      );
+      if (firstUserEntry) {
+        this.claudeSessionsService.trySetSessionName(
+          client.deviceId,
+          data.sessionKey,
+          firstUserEntry.content!.text!,
+        );
+      }
+    }
+
     return { success: true };
   }
 
@@ -1713,6 +1739,19 @@ export class WebsocketGateway
 
     // Broadcast to all subscribers of this transcript
     this.server.to(roomName).emit('transcript_update', data);
+
+    // Auto-set session name from first user message in transcript mode
+    if (
+      data.entry?.type === 'user' &&
+      data.entry.content?.text &&
+      client.deviceId
+    ) {
+      this.claudeSessionsService.trySetSessionName(
+        client.deviceId,
+        data.sessionKey,
+        data.entry.content.text,
+      );
+    }
 
     return { success: true };
   }

@@ -100,6 +100,7 @@ model ClaudeSession {
   deviceId        String
   sessionKey      String                // Our session key for routing
   directory       String                // Working directory where session was started
+  name            String?               // Auto-set from first user message as session summary
   state           ClaudeSessionState    @default(INACTIVE)
   lastUsedAt      DateTime              @default(now())
   transcriptPath  String?               // Path to Claude's transcript file (null for SDK streaming)

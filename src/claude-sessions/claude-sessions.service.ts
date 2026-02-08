@@ -32,6 +32,8 @@ interface BufferedMessage {
   data: StoreMessageDto;
 }
 
+export type SessionNamedCallback = (deviceId: string, sessionKey: string, name: string) => void;
+
 const FLUSH_INTERVAL_MS = 2_000;
 const MAX_BUFFER_SIZE = 50;
 const MAX_CACHE_SIZE = 1_000;
@@ -50,8 +52,37 @@ export class ClaudeSessionsService implements OnModuleDestroy {
   private flushTimer: NodeJS.Timeout;
   private isFlushing = false;
 
+  // Callback for when a session gets auto-named
+  private onSessionNamedCallback?: SessionNamedCallback;
+
   constructor(private prisma: PrismaService) {
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+  }
+
+  /** Register a callback to be invoked when a session is auto-named. */
+  onSessionNamed(callback: SessionNamedCallback): void {
+    this.onSessionNamedCallback = callback;
+  }
+
+  /**
+   * Try to set a session name from a user message.
+   * Only sets the name if it's currently null (first message wins).
+   * Non-blocking — fires and forgets.
+   */
+  trySetSessionName(deviceId: string, sessionKey: string, content: string): void {
+    const name = content.slice(0, 100);
+    this.prisma.claudeSession.updateMany({
+      where: {
+        deviceId,
+        sessionKey,
+        name: null,
+      },
+      data: { name },
+    }).then((result) => {
+      if (result.count > 0 && this.onSessionNamedCallback) {
+        this.onSessionNamedCallback(deviceId, sessionKey, name);
+      }
+    }).catch(() => { /* non-critical */ });
   }
 
   async onModuleDestroy() {
@@ -215,8 +246,47 @@ export class ClaudeSessionsService implements OnModuleDestroy {
     if (ops.length > 0) {
       try {
         await this.prisma.$transaction(ops);
+
+        // Auto-set session name from the first user message
+        await this.autoSetSessionNames(entries);
       } catch (error) {
         this.logger.error(`Message flush transaction failed: ${error}`);
+      }
+    }
+  }
+
+  /** For sessions without a name, set it from the first user message content. */
+  private async autoSetSessionNames(entries: BufferedMessage[]): Promise<void> {
+    // Collect user messages grouped by session cache key
+    const userMsgBySession = new Map<string, string>();
+    for (const { deviceId, sessionKey, data } of entries) {
+      if (data.type === 'user' && data.content) {
+        const key = `${deviceId}:${sessionKey}`;
+        if (!userMsgBySession.has(key)) {
+          userMsgBySession.set(key, data.content);
+        }
+      }
+    }
+    if (userMsgBySession.size === 0) return;
+
+    for (const [cacheKey, content] of userMsgBySession) {
+      const sessionId = this.sessionIdCache.get(cacheKey);
+      if (!sessionId) continue;
+
+      try {
+        // Only update if name is still null (first user message wins)
+        const result = await this.prisma.claudeSession.updateMany({
+          where: { id: sessionId, name: null },
+          data: { name: content.slice(0, 100) },
+        });
+
+        // Notify gateway so it can broadcast the name to mobile clients
+        if (result.count > 0 && this.onSessionNamedCallback) {
+          const [deviceId, sessionKey] = cacheKey.split(':');
+          this.onSessionNamedCallback(deviceId, sessionKey, content.slice(0, 100));
+        }
+      } catch {
+        // Non-critical — ignore
       }
     }
   }
@@ -382,6 +452,19 @@ export class ClaudeSessionsService implements OnModuleDestroy {
     const session = await this.getSessionByKey(deviceId, sessionKey);
     if (!session) {
       return null;
+    }
+
+    // Auto-set session name from first user message
+    if (data.type === 'user' && data.content && !session.name) {
+      try {
+        await this.prisma.claudeSession.update({
+          where: { id: session.id },
+          data: { name: data.content.slice(0, 100) },
+        });
+        if (this.onSessionNamedCallback) {
+          this.onSessionNamedCallback(deviceId, sessionKey, data.content.slice(0, 100));
+        }
+      } catch { /* non-critical */ }
     }
 
     // Upsert message (avoid duplicates)
