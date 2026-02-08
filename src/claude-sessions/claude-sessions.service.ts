@@ -70,6 +70,8 @@ export class ClaudeSessionsService implements OnModuleDestroy {
    * Non-blocking — fires and forgets.
    */
   trySetSessionName(deviceId: string, sessionKey: string, content: string): void {
+    // Skip tool noise / non-meaningful content
+    if (!content || /^\[request interrupted|^\[tool/i.test(content)) return;
     const name = content.slice(0, 100);
     this.prisma.claudeSession.updateMany({
       where: {
