@@ -1374,6 +1374,52 @@ export class WebsocketGateway
     return { success: true };
   }
 
+  // ==================== READ FILE EVENTS ====================
+
+  // Read file request from mobile (e.g., CLAUDE.md)
+  @SubscribeMessage('read_file')
+  handleReadFile(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody()
+    data: { deviceId: string; filePath: string; requestId: string },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    // Forward to device
+    this.sendToDevice(data.deviceId, 'read_file', {
+      filePath: data.filePath,
+      requestId: data.requestId,
+      requestedBy: client.userId,
+    });
+
+    return { success: true };
+  }
+
+  // Read file response from device
+  @SubscribeMessage('read_file_response')
+  handleReadFileResponse(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody()
+    data: {
+      requestId: string;
+      content?: string;
+      exists: boolean;
+      fileName: string;
+      error?: string;
+    },
+  ) {
+    if (!client.deviceId) {
+      return { error: 'Not authenticated as device' };
+    }
+
+    // Broadcast to device room (mobile app is subscribed)
+    this.server.to(`device:${client.deviceId}`).emit('read_file_response', data);
+
+    return { success: true };
+  }
+
   // ==================== TAB COMPLETION EVENTS ====================
 
   // Tab completion request from mobile
