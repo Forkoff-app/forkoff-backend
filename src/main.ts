@@ -13,7 +13,7 @@ async function bootstrap() {
   // Load secrets from AWS Secrets Manager before anything else
   await loadSecrets();
 
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   const logger = new Logger('HTTP');
 
   // Log all incoming requests to /devices
@@ -39,7 +39,7 @@ async function bootstrap() {
       : true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'stripe-signature'],
   });
 
   // Global validation pipe

@@ -22,6 +22,7 @@ import { SubscriptionModule } from './subscription/subscription.module';
 import { VouchersModule } from './vouchers/vouchers.module';
 import { ReferralsModule } from './referrals/referrals.module';
 import { HealthModule } from './health/health.module';
+import { StripeModule } from './stripe/stripe.module';
 
 @Module({
   providers: [
@@ -79,6 +80,7 @@ import { HealthModule } from './health/health.module';
     SubscriptionModule,
     VouchersModule,
     ReferralsModule,
+    StripeModule,
 
     // WebSocket
     WebsocketModule,

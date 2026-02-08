@@ -21,6 +21,10 @@ model User {
   subscription     String        @default("free") // free, pro, team
   proExpiresAt     DateTime?     // When PRO subscription expires (for voucher/referral benefits)
   isLifetimePro    Boolean       @default(false) // Permanent PRO access from lifetime voucher
+  stripeCustomerId       String?   @unique
+  stripeSubscriptionId   String?
+  stripePriceId          String?
+  stripeCurrentPeriodEnd DateTime?
   country          String?
   countryUpdatedAt DateTime?
   timezone         String?       @default("UTC")

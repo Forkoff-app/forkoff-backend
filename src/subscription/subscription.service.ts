@@ -128,6 +128,7 @@ export class SubscriptionService {
         subscription: true,
         isLifetimePro: true,
         proExpiresAt: true,
+        stripeSubscriptionId: true,
       },
     });
 
@@ -137,6 +138,11 @@ export class SubscriptionService {
 
     // Don't downgrade lifetime PRO users
     if (user.isLifetimePro) {
+      return;
+    }
+
+    // Don't downgrade users with active Stripe subscriptions
+    if (user.stripeSubscriptionId) {
       return;
     }
 
