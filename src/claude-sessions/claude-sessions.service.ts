@@ -356,6 +356,14 @@ export class ClaudeSessionsService implements OnModuleDestroy {
     });
   }
 
+  // Get unnamed sessions for a device (for backfill)
+  async getUnnamedSessions(deviceId: string): Promise<Pick<ClaudeSession, 'id' | 'sessionKey'>[]> {
+    return this.prisma.claudeSession.findMany({
+      where: { deviceId, name: null },
+      select: { id: true, sessionKey: true },
+    });
+  }
+
   // Get active sessions for a device
   async getActiveSessionsForDevice(deviceId: string): Promise<ClaudeSession[]> {
     return this.prisma.claudeSession.findMany({

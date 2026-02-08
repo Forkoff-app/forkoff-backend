@@ -151,6 +151,7 @@ export class WebsocketGateway
         deviceId,
         sessionKey,
         name,
+        lastUsedAt: new Date().toISOString(),
       });
     });
   }
@@ -160,6 +161,9 @@ export class WebsocketGateway
 
   private readonly logger = new Logger(WebsocketGateway.name);
   private supabase: SupabaseClient;
+
+  // Track sessions we've already requested name backfill for (avoid repeats)
+  private nameBackfillRequested = new Set<string>();
 
   // Track connected clients
   private userConnections = new Map<string, Set<string>>(); // userId -> Set of socket IDs
@@ -1248,6 +1252,9 @@ export class WebsocketGateway
 
     this.logger.log(`Received claude_session_batch_update: ${data.sessions?.length ?? 0} sessions`);
 
+    // Collect sessions that need name backfill
+    const needsNameBackfill: Array<{ sessionKey: string; transcriptPath: string }> = [];
+
     for (const session of data.sessions ?? []) {
       // Buffer for batched DB write
       this.claudeSessionsService.bufferSessionUpsert(deviceId, session);
@@ -1261,9 +1268,66 @@ export class WebsocketGateway
         transcriptPath: session.transcriptPath,
         deviceId,
       });
+
+      // Check if this session needs a name backfill
+      if (session.transcriptPath) {
+        const backfillKey = `${deviceId}:${session.sessionKey}`;
+        if (!this.nameBackfillRequested.has(backfillKey)) {
+          needsNameBackfill.push({
+            sessionKey: session.sessionKey,
+            transcriptPath: session.transcriptPath,
+          });
+        }
+      }
+    }
+
+    // Request transcript for unnamed sessions so we can extract names
+    if (needsNameBackfill.length > 0) {
+      this.backfillSessionNames(deviceId, needsNameBackfill);
     }
 
     return { success: true, count: data.sessions?.length ?? 0 };
+  }
+
+  /**
+   * For sessions without a name, request a small transcript fetch from the CLI
+   * to extract the first user message. Runs in the background, non-blocking.
+   */
+  private async backfillSessionNames(
+    deviceId: string,
+    sessions: Array<{ sessionKey: string; transcriptPath: string }>,
+  ): Promise<void> {
+    // Check DB for which sessions actually need names
+    const unnamed = await this.claudeSessionsService.getUnnamedSessions(deviceId);
+    const unnamedKeys = new Set(unnamed.map((s) => s.sessionKey));
+
+    let requested = 0;
+    for (const session of sessions) {
+      if (!unnamedKeys.has(session.sessionKey)) continue;
+
+      const backfillKey = `${deviceId}:${session.sessionKey}`;
+      this.nameBackfillRequested.add(backfillKey);
+
+      // Request just the first 5 entries (enough to find the first user message)
+      this.sendToDevice(deviceId, 'transcript_fetch', {
+        sessionKey: session.sessionKey,
+        transcriptPath: session.transcriptPath,
+        offset: 0,
+        limit: 5,
+        reverse: false,
+        requestedBy: '__system_backfill__',
+      });
+
+      requested++;
+      // Stagger requests to avoid overwhelming the CLI
+      if (requested % 10 === 0) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+
+    if (requested > 0) {
+      this.logger.log(`Requested name backfill for ${requested} unnamed sessions on device ${deviceId}`);
+    }
   }
 
   // ==================== DIRECTORY LISTING EVENTS ====================
