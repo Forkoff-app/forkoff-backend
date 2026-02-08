@@ -443,9 +443,12 @@ model PhoneSession {
 
 // Waitlist for pre-launch signups
 model Waitlist {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  createdAt DateTime @default(now())
+  id                  String   @id @default(uuid())
+  email               String   @unique
+  createdAt           DateTime @default(now())
+  confirmationSent    Boolean  @default(false)
+  betaAccessSent      Boolean  @default(false)
+  betaAccessSentAt    DateTime?
 
   @@map("waitlist")
 }

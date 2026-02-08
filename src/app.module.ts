@@ -23,6 +23,8 @@ import { VouchersModule } from './vouchers/vouchers.module';
 import { ReferralsModule } from './referrals/referrals.module';
 import { HealthModule } from './health/health.module';
 import { StripeModule } from './stripe/stripe.module';
+import { EmailModule } from './email/email.module';
+import { WaitlistModule } from './waitlist/waitlist.module';
 
 @Module({
   providers: [
@@ -81,6 +83,8 @@ import { StripeModule } from './stripe/stripe.module';
     VouchersModule,
     ReferralsModule,
     StripeModule,
+    EmailModule,
+    WaitlistModule,
 
     // WebSocket
     WebsocketModule,
