@@ -2,29 +2,28 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { Request, Response, NextFunction } from 'express';
+import { WinstonModule } from 'nest-winston';
 import { AppModule } from './app.module';
 import { loadSecrets } from './config/secrets';
+import { winstonConfig } from './logging/winston.config';
+import { AllExceptionsFilter } from './logging/all-exceptions.filter';
 
 // Store server reference for graceful shutdown
 let server: any;
+
+const logger = new Logger('Bootstrap');
 
 async function bootstrap() {
   // Load secrets from AWS Secrets Manager before anything else
   await loadSecrets();
 
-  const app = await NestFactory.create(AppModule, { rawBody: true });
-  const logger = new Logger('HTTP');
-
-  // Log all incoming requests to /devices
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    const { method, url, headers } = req;
-    if (url.includes('/devices')) {
-      logger.log(`[${method}] ${url}`);
-      logger.log(`Authorization header: ${headers.authorization ? headers.authorization.substring(0, 50) + '...' : 'NONE'}`);
-    }
-    next();
+  const app = await NestFactory.create(AppModule, {
+    rawBody: true,
+    logger: WinstonModule.createLogger(winstonConfig),
   });
+
+  // Register global exception filter
+  app.useGlobalFilters(new AllExceptionsFilter());
 
   // Get config service
   const configService = app.get(ConfigService);
@@ -98,12 +97,12 @@ async function bootstrap() {
   const port = configService.get<number>('PORT') || 3000;
   server = await app.listen(port);
 
-  console.log(`ForkOff API running on http://localhost:${port}`);
+  logger.log(`ForkOff API running on http://localhost:${port}`);
   if (nodeEnv !== 'production' && nodeEnv !== 'Prod') {
-    console.log(`Swagger docs at http://localhost:${port}/docs`);
+    logger.log(`Swagger docs at http://localhost:${port}/docs`);
   }
-  console.log(`WebSocket available on ws://localhost:${port}`);
-  console.log(`Health check at http://localhost:${port}/health`);
+  logger.log(`WebSocket available on ws://localhost:${port}`);
+  logger.log(`Health check at http://localhost:${port}/health`);
 
   // Store app reference for graceful shutdown
   return app;
@@ -111,18 +110,18 @@ async function bootstrap() {
 
 // Graceful shutdown handler
 async function gracefulShutdown(signal: string) {
-  console.log(`\n⚠️  Received ${signal}. Starting graceful shutdown...`);
+  logger.warn(`Received ${signal}. Starting graceful shutdown...`);
 
   if (server) {
     // Stop accepting new connections
     server.close(() => {
-      console.log('✅ HTTP server closed');
+      logger.log('HTTP server closed');
       process.exit(0);
     });
 
     // Force exit after 10 seconds if server doesn't close gracefully
     setTimeout(() => {
-      console.error('❌ Forcing shutdown after 10 seconds');
+      logger.error('Forcing shutdown after 10 seconds');
       process.exit(1);
     }, 10000);
   } else {
@@ -136,13 +135,13 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
+  logger.error('Uncaught Exception:', error);
   gracefulShutdown('uncaughtException');
 });
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
 });
 
 bootstrap();

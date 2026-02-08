@@ -10,6 +10,7 @@ import {
   HttpCode,
   HttpStatus,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -29,6 +30,8 @@ import { User } from '@prisma/client';
 @Controller('auth')
 @UseGuards(JwtAuthGuard)
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
   constructor(
     private authService: AuthService,
     private appConfigService: AppConfigService,
@@ -41,11 +44,11 @@ export class AuthController {
   async getProfile(@CurrentUser() user: User, @Req() req: Request) {
     // Extract IP for country detection
     const ip = this.extractIp(req);
-    console.log(`[AuthController] /auth/me called for user ${user.id}, IP: ${ip}`);
+    this.logger.log(`/auth/me called for user ${user.id}, IP: ${ip}`);
 
     // Update country if needed (async, don't wait)
     this.authService.updateCountryFromIp(user.id, ip).catch((err) => {
-      console.error('Failed to update country:', err);
+      this.logger.error('Failed to update country:', err);
     });
 
     const [profile, versionConfig] = await Promise.all([

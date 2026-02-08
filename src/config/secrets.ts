@@ -2,6 +2,7 @@ import {
   SecretsManagerClient,
   GetSecretValueCommand,
 } from '@aws-sdk/client-secrets-manager';
+import { Logger } from '@nestjs/common';
 
 interface SecretPayload {
   SUPABASE_URL: string;
@@ -27,6 +28,7 @@ interface SecretPayload {
 
 const SECRET_NAME = 'forkoff-api';
 const REGION = 'us-east-1';
+const logger = new Logger('Secrets');
 
 /**
  * Loads secrets from AWS Secrets Manager and sets them as environment variables.
@@ -35,11 +37,11 @@ const REGION = 'us-east-1';
 export async function loadSecrets(): Promise<void> {
   // Skip in development or if DATABASE_URL is already set (local dev)
   if (process.env.NODE_ENV === 'development' || process.env.DATABASE_URL) {
-    console.log('Using local environment variables');
+    logger.log('Using local environment variables');
     return;
   }
 
-  console.log('Loading secrets from AWS Secrets Manager...');
+  logger.log('Loading secrets from AWS Secrets Manager...');
 
   const client = new SecretsManagerClient({ region: REGION });
 
@@ -74,9 +76,9 @@ export async function loadSecrets(): Promise<void> {
       }
     }
 
-    console.log('Secrets loaded successfully from AWS Secrets Manager');
+    logger.log('Secrets loaded successfully from AWS Secrets Manager');
   } catch (error) {
-    console.error('Failed to load secrets from AWS Secrets Manager:', error);
+    logger.error('Failed to load secrets from AWS Secrets Manager:', error);
     throw error;
   }
 }

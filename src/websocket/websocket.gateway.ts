@@ -754,7 +754,7 @@ export class WebsocketGateway
   getSessionSocket(sessionId: string): Socket | undefined {
     // Use directly stored socket reference (like Happy does)
     const socket = this.sessionSockets.get(sessionId);
-    console.log(`[DEBUG] getSessionSocket: sessionId=${sessionId}, hasSocket=${!!socket}, connected=${socket?.connected}, sessionSocketsKeys=${JSON.stringify(Array.from(this.sessionSockets.keys()))}`);
+    this.logger.debug(`getSessionSocket: sessionId=${sessionId}, hasSocket=${!!socket}, connected=${socket?.connected}, sessionSocketsKeys=${JSON.stringify(Array.from(this.sessionSockets.keys()))}`);
     if (socket && socket.connected) {
       return socket;
     }
@@ -1628,7 +1628,7 @@ export class WebsocketGateway
     }
 
     this.logger.log(`Mobile requesting SDK session history: ${data.sessionKey}`);
-    console.log(`[DEBUG] sdk_session_history called for sessionKey=${data.sessionKey}, deviceId=${data.deviceId}, claudeSessionId=${data.claudeSessionId}`);
+    this.logger.debug(`sdk_session_history called for sessionKey=${data.sessionKey}, deviceId=${data.deviceId}, claudeSessionId=${data.claudeSessionId}`);
 
     // Use claudeSessionId from request if provided, otherwise try DB lookup
     let claudeSessionId = data.claudeSessionId || null;
@@ -1638,9 +1638,9 @@ export class WebsocketGateway
         data.sessionKey,
       );
       claudeSessionId = session?.claudeSessionId || null;
-      console.log(`[DEBUG] claudeSessionId from DB: ${claudeSessionId}`);
+      this.logger.debug(`claudeSessionId from DB: ${claudeSessionId}`);
     } else {
-      console.log(`[DEBUG] Using claudeSessionId from request: ${claudeSessionId}`);
+      this.logger.debug(`Using claudeSessionId from request: ${claudeSessionId}`);
     }
 
     // Find ANY connected CLI for this user (not just the exact session or device)
@@ -1652,20 +1652,20 @@ export class WebsocketGateway
     if (this.isSessionConnected(data.sessionKey)) {
       cliSocket = this.getSessionSocket(data.sessionKey);
       connectedSessionKey = data.sessionKey;
-      console.log(`[DEBUG] Found exact session ${data.sessionKey}`);
+      this.logger.debug(`Found exact session ${data.sessionKey}`);
     }
 
     // If not found, try by userId (the Happy-coder pattern)
     if (!cliSocket && client.userId) {
       const userSessions = this.userCliConnections.get(client.userId);
-      console.log(`[DEBUG] Looking for CLI by userId ${client.userId}, userSessions: ${userSessions ? Array.from(userSessions) : 'none'}`);
+      this.logger.debug(`Looking for CLI by userId ${client.userId}, userSessions: ${userSessions ? Array.from(userSessions) : 'none'}`);
       if (userSessions) {
         for (const sessionId of userSessions) {
           const socket = this.sessionSockets.get(sessionId) as AuthenticatedSocket | undefined;
           if (socket?.connected) {
             cliSocket = socket;
             connectedSessionKey = sessionId;
-            console.log(`[DEBUG] Using user's CLI session ${sessionId} for userId ${client.userId}`);
+            this.logger.debug(`Using user's CLI session ${sessionId} for userId ${client.userId}`);
             break;
           }
         }
@@ -1676,25 +1676,25 @@ export class WebsocketGateway
     if (!cliSocket) {
       for (const [sessionId, socketId] of this.sessionConnections.entries()) {
         const socket = this.sessionSockets.get(sessionId) as AuthenticatedSocket | undefined;
-        console.log(`[DEBUG] Fallback - Checking session ${sessionId}: connected=${socket?.connected}, socketDeviceId=${socket?.deviceId}, requestedDeviceId=${data.deviceId}`);
+        this.logger.debug(`Fallback - Checking session ${sessionId}: connected=${socket?.connected}, socketDeviceId=${socket?.deviceId}, requestedDeviceId=${data.deviceId}`);
         if (socket?.connected && socket.deviceId === data.deviceId) {
           cliSocket = socket;
           connectedSessionKey = sessionId;
-          console.log(`[DEBUG] Using alternate CLI session ${sessionId} for device ${data.deviceId}`);
+          this.logger.debug(`Using alternate CLI session ${sessionId} for device ${data.deviceId}`);
           break;
         }
       }
     }
 
-    console.log(`[DEBUG] sessionConnections keys:`, Array.from(this.sessionConnections.keys()));
-    console.log(`[DEBUG] userCliConnections keys:`, Array.from(this.userCliConnections.keys()));
-    console.log(`[DEBUG] Found CLI socket: ${cliSocket ? 'yes' : 'no'}, via session: ${connectedSessionKey}`);
+    this.logger.debug(`sessionConnections keys: ${JSON.stringify(Array.from(this.sessionConnections.keys()))}`);
+    this.logger.debug(`userCliConnections keys: ${JSON.stringify(Array.from(this.userCliConnections.keys()))}`);
+    this.logger.debug(`Found CLI socket: ${cliSocket ? 'yes' : 'no'}, via session: ${connectedSessionKey}`);
 
     // Forward to CLI via RPC
     const requestId = `history-${Date.now()}`;
 
     if (!cliSocket) {
-      console.log(`[DEBUG] No CLI socket found for session ${data.sessionKey}`);
+      this.logger.debug(`No CLI socket found for session ${data.sessionKey}`);
       client.emit('sdk_session_history', {
         sessionKey: data.sessionKey,
         entries: [],
@@ -1741,7 +1741,7 @@ export class WebsocketGateway
     cliSocket.on('rpc_response', responseHandler);
 
     // Send RPC request to CLI
-    console.log(`[DEBUG] Sending RPC get_session_history to CLI, requestId=${requestId}, claudeSessionId=${claudeSessionId}, sessionKey=${data.sessionKey}`);
+    this.logger.debug(`Sending RPC get_session_history to CLI, requestId=${requestId}, claudeSessionId=${claudeSessionId}, sessionKey=${data.sessionKey}`);
     this.sendToSession(connectedSessionKey!, 'rpc_request', {
       requestId,
       method: 'get_session_history',
