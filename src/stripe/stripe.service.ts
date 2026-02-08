@@ -74,8 +74,8 @@ export class StripeService {
       customer: customerId,
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: 'https://forkoff.app/checkout-success',
-      cancel_url: 'https://forkoff.app/checkout-cancelled',
+      success_url: 'https://forkoff.app/?checkout=success',
+      cancel_url: 'https://forkoff.app/?checkout=cancelled',
       subscription_data: {
         metadata: { userId },
       },
