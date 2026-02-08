@@ -44,6 +44,22 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Clean up Docker images on EC2
+        run: |
+          # Clean up old Docker images before deploying
+          CLEANUP_ID=$(aws ssm send-command \
+            --targets "Key=tag:Name,Values=forkoff-backend" \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{"commands":["docker system prune -af"]}' \
+            --comment "Cleanup before deploy" \
+            --timeout-seconds 60 \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "Cleanup Command ID: $CLEANUP_ID"
+          sleep 10
+          echo "Cleanup completed"
+
       - name: Deploy to all EC2 instances via SSM
         run: |
           # Target all instances in the ASG by tag
