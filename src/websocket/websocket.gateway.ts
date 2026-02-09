@@ -2521,4 +2521,114 @@ export class WebsocketGateway
       return { error: 'Failed to update queue item' };
     }
   }
+
+  // ===== E2EE (End-to-End Encryption) Handlers =====
+
+  /**
+   * Handle encrypted key exchange initialization
+   * Mobile → CLI: Initial key exchange
+   */
+  @SubscribeMessage('encrypted_key_exchange_init')
+  async handleEncryptedKeyExchangeInit(
+    @MessageBody() data: {
+      senderDeviceId: string;
+      recipientDeviceId: string;
+      ephemeralPublicKey: string;
+    },
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    if (!data.recipientDeviceId) {
+      client.emit('error', { message: 'recipientDeviceId is required' });
+      return;
+    }
+
+    // Find recipient socket
+    const recipientSocket = this.findSocketByDeviceId(data.recipientDeviceId);
+
+    if (recipientSocket) {
+      // Forward key exchange init to recipient
+      recipientSocket.emit('encrypted_key_exchange_init', {
+        senderDeviceId: data.senderDeviceId,
+        ephemeralPublicKey: data.ephemeralPublicKey,
+      });
+    }
+    // If recipient offline, silently ignore (could store for later delivery)
+  }
+
+  /**
+   * Handle encrypted key exchange acknowledgment
+   * CLI → Mobile: Key exchange response
+   */
+  @SubscribeMessage('encrypted_key_exchange_ack')
+  async handleEncryptedKeyExchangeAck(
+    @MessageBody() data: {
+      senderDeviceId: string;
+      recipientDeviceId: string;
+      ephemeralPublicKey: string;
+    },
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    if (!data.recipientDeviceId) {
+      client.emit('error', { message: 'recipientDeviceId is required' });
+      return;
+    }
+
+    // Find recipient socket (original sender)
+    const recipientSocket = this.findSocketByDeviceId(data.recipientDeviceId);
+
+    if (recipientSocket) {
+      recipientSocket.emit('encrypted_key_exchange_ack', {
+        senderDeviceId: data.senderDeviceId,
+        ephemeralPublicKey: data.ephemeralPublicKey,
+      });
+    }
+  }
+
+  /**
+   * Handle encrypted message
+   * Forward encrypted blob without decryption
+   */
+  @SubscribeMessage('encrypted_message')
+  async handleEncryptedMessage(
+    @MessageBody() data: {
+      senderDeviceId: string;
+      recipientDeviceId: string;
+      sessionId: string;
+      payload: {
+        ciphertext: string;
+        nonce: string;
+        authTag: string;
+      };
+      messageCounter: number;
+      timestamp: string;
+    },
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    if (!data.senderDeviceId || !data.recipientDeviceId) {
+      client.emit('error', {
+        message: 'senderDeviceId and recipientDeviceId are required',
+      });
+      return;
+    }
+
+    // Find recipient socket
+    const recipientSocket = this.findSocketByDeviceId(data.recipientDeviceId);
+
+    if (recipientSocket) {
+      // Forward encrypted message as-is (no decryption)
+      recipientSocket.emit('encrypted_message', data);
+    }
+    // If recipient offline, could store for later delivery
+  }
+
+  /**
+   * Find a socket by device ID
+   */
+  private findSocketByDeviceId(deviceId: string): AuthenticatedSocket | null {
+    const socketId = this.deviceConnections.get(deviceId);
+    if (!socketId) {
+      return null;
+    }
+    return this.server.sockets.sockets.get(socketId) as AuthenticatedSocket | null;
+  }
 }

@@ -26,6 +26,7 @@ import { HealthModule } from './health/health.module';
 import { StripeModule } from './stripe/stripe.module';
 import { EmailModule } from './email/email.module';
 import { WaitlistModule } from './waitlist/waitlist.module';
+import { CryptoModule } from './crypto/crypto.module';
 
 @Module({
   providers: [
@@ -86,6 +87,7 @@ import { WaitlistModule } from './waitlist/waitlist.module';
     StripeModule,
     EmailModule,
     WaitlistModule,
+    CryptoModule,
 
     // WebSocket
     WebsocketModule,
