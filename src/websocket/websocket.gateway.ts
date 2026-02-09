@@ -1368,8 +1368,13 @@ export class WebsocketGateway
       return { error: 'Not authenticated as device' };
     }
 
-    // Broadcast to device room (mobile app is subscribed)
+    // Broadcast to device room (mobile app may be subscribed)
     this.server.to(`device:${client.deviceId}`).emit('directory_list_response', data);
+
+    // Also broadcast to user room as fallback
+    if (client.userId) {
+      this.server.to(`user:${client.userId}`).emit('directory_list_response', data);
+    }
 
     return { success: true };
   }
@@ -1414,8 +1419,13 @@ export class WebsocketGateway
       return { error: 'Not authenticated as device' };
     }
 
-    // Broadcast to device room (mobile app is subscribed)
+    // Broadcast to device room (mobile app may be subscribed)
     this.server.to(`device:${client.deviceId}`).emit('read_file_response', data);
+
+    // Also broadcast to user room as fallback (mobile is always in user room)
+    if (client.userId) {
+      this.server.to(`user:${client.userId}`).emit('read_file_response', data);
+    }
 
     return { success: true };
   }
