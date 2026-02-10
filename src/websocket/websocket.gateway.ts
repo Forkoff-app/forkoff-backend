@@ -1485,6 +1485,7 @@ export class WebsocketGateway
       sessionKey: string;
       directory: string;
       terminalSessionId: string;
+      dangerouslySkipPermissions?: boolean;
     },
   ) {
     this.logger.log(`Received claude_resume_session from ${client.userId} for device ${data.deviceId}`);
@@ -1499,6 +1500,7 @@ export class WebsocketGateway
       directory: data.directory,
       terminalSessionId: data.terminalSessionId,
       requestedBy: client.userId,
+      dangerouslySkipPermissions: data.dangerouslySkipPermissions ?? false,
     });
 
     return { success: true };
@@ -1513,6 +1515,7 @@ export class WebsocketGateway
       deviceId: string;
       directory: string;
       terminalSessionId: string;
+      dangerouslySkipPermissions?: boolean;
     },
   ) {
     if (!client.userId) {
@@ -1524,6 +1527,7 @@ export class WebsocketGateway
       directory: data.directory,
       terminalSessionId: data.terminalSessionId,
       requestedBy: client.userId,
+      dangerouslySkipPermissions: data.dangerouslySkipPermissions ?? false,
     });
 
     return { success: true };
@@ -2301,6 +2305,32 @@ export class WebsocketGateway
     } catch (error) {
       this.logger.error(`Failed to send push notification: ${error}`);
     }
+
+    return { success: true };
+  }
+
+  // Tool activity notification from CLI (non-blocking, informational only)
+  @SubscribeMessage('tool_activity')
+  handleToolActivity(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      terminalSessionId: string;
+      sessionKey?: string;
+      toolName: string;
+      toolId: string;
+      inputSummary: string;
+    },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    // Forward to user's mobile clients
+    this.server.to(`user:${client.userId}`).emit('tool_activity', {
+      ...data,
+      deviceId: client.deviceId,
+      timestamp: new Date().toISOString(),
+    });
 
     return { success: true };
   }
