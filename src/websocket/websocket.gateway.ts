@@ -67,6 +67,7 @@ interface UserMessagePayload {
   deviceId: string;
   message: string;
   sessionKey?: string;
+  directory?: string;
   mode?: {
     permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
     model?: string;
@@ -979,6 +980,7 @@ export class WebsocketGateway
       deviceId: data.deviceId,
       message: data.message,
       sessionKey: data.sessionKey,
+      directory: data.directory,
       mode: data.mode,
     };
 
