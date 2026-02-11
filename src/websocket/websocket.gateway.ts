@@ -566,6 +566,20 @@ export class WebsocketGateway
       } catch (error) {
         this.logger.error(`Failed to clean phone session: ${error}`);
       }
+
+      // Notify CLI sessions that mobile user disconnected
+      // so they can clear taken-over state and revert to watch-only
+      const cliSessions = this.userCliConnections.get(client.userId);
+      if (cliSessions && cliSessions.size > 0) {
+        const payload = {
+          userId: client.userId,
+          timestamp: new Date().toISOString(),
+        };
+        for (const cliSessionId of cliSessions) {
+          this.sendToSession(cliSessionId, 'mobile_disconnected', payload);
+        }
+        this.logger.log(`Notified ${cliSessions.size} CLI session(s) of mobile disconnect for user ${client.userId}`);
+      }
     }
   }
 
