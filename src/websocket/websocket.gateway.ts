@@ -2311,6 +2311,112 @@ export class WebsocketGateway
     return { success: true };
   }
 
+  // Permission prompt from CLI — Claude wants to use a tool and needs mobile approval
+  @SubscribeMessage('permission_prompt')
+  async handlePermissionPrompt(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      promptId: string;
+      terminalSessionId: string;
+      sessionKey?: string;
+      toolName: string;
+      toolInput: any;
+      toolUseId: string;
+    },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    this.logger.log(
+      `Permission prompt from CLI: ${data.toolName} (${data.promptId}) for user ${client.userId}`,
+    );
+
+    // Forward to user's mobile clients
+    this.server.to(`user:${client.userId}`).emit('permission_prompt', {
+      ...data,
+      deviceId: client.deviceId,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Send push notification for permission prompt
+    try {
+      await this.notificationsService.sendApprovalNotification(client.userId, data.promptId, {
+        terminalSessionId: data.terminalSessionId,
+        sessionKey: data.sessionKey,
+        context: [],
+        options: ['y:yes', 'n:no'],
+        promptText: `Claude wants to use ${data.toolName}`,
+      });
+    } catch (error) {
+      this.logger.error(`Failed to send push notification for permission prompt: ${error}`);
+    }
+
+    return { success: true };
+  }
+
+  // Permission response from mobile — user approved or denied a tool use
+  @SubscribeMessage('permission_response')
+  handlePermissionResponse(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      promptId: string;
+      decision: 'allow' | 'deny';
+      reason?: string;
+      deviceId?: string;
+      sessionKey?: string;
+    },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    this.logger.log(
+      `Permission response: ${data.promptId} -> ${data.decision} from ${client.userId}`,
+    );
+
+    const responsePayload = {
+      promptId: data.promptId,
+      decision: data.decision,
+      reason: data.reason,
+      respondedBy: client.userId,
+    };
+
+    // Route response back to CLI — try session, then device, then user's CLIs
+    let routingSucceeded = false;
+
+    if (data.sessionKey && this.isSessionConnected(data.sessionKey)) {
+      this.sendToSession(data.sessionKey, 'permission_response', responsePayload);
+      routingSucceeded = true;
+    }
+
+    if (!routingSucceeded && data.deviceId && this.isDeviceOnline(data.deviceId)) {
+      this.sendToDevice(data.deviceId, 'permission_response', responsePayload);
+      routingSucceeded = true;
+    }
+
+    if (!routingSucceeded) {
+      // Fallback: find any CLI for this user
+      const userSessions = this.userCliConnections.get(client.userId);
+      if (userSessions && userSessions.size > 0) {
+        const cliSessionId = userSessions.values().next().value;
+        if (this.isSessionConnected(cliSessionId)) {
+          this.sendToSession(cliSessionId, 'permission_response', responsePayload);
+          routingSucceeded = true;
+        }
+      }
+    }
+
+    if (!routingSucceeded) {
+      this.logger.error(
+        `Failed to route permission response for ${data.promptId}: No connected CLI found`,
+      );
+      return { error: 'No CLI connection found' };
+    }
+
+    return { success: true };
+  }
+
   // Tool activity notification from CLI (non-blocking, informational only)
   @SubscribeMessage('tool_activity')
   handleToolActivity(
