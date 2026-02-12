@@ -2369,6 +2369,33 @@ export class WebsocketGateway
     return { success: true };
   }
 
+  // Pending permissions sync from CLI — sends all pending prompts to mobile on take-over
+  @SubscribeMessage('pending_permissions_sync')
+  handlePendingPermissionsSync(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      sessionKey: string;
+      terminalSessionId: string;
+      prompts: any[];
+    },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    this.logger.log(
+      `Pending permissions sync from CLI: ${data.prompts?.length || 0} prompt(s) for user ${client.userId}`,
+    );
+
+    // Forward to user's mobile clients
+    this.server.to(`user:${client.userId}`).emit('pending_permissions_sync', {
+      ...data,
+      deviceId: client.deviceId,
+    });
+
+    return { success: true };
+  }
+
   // Permission response from mobile — user approved or denied a tool use
   @SubscribeMessage('permission_response')
   handlePermissionResponse(
