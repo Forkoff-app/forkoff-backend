@@ -1502,6 +1502,7 @@ export class WebsocketGateway
       directory: string;
       terminalSessionId: string;
       dangerouslySkipPermissions?: boolean;
+      interactivePermissions?: boolean;
     },
   ) {
     this.logger.log(`Received claude_resume_session from ${client.userId} for device ${data.deviceId}`);
@@ -1517,6 +1518,7 @@ export class WebsocketGateway
       terminalSessionId: data.terminalSessionId,
       requestedBy: client.userId,
       dangerouslySkipPermissions: data.dangerouslySkipPermissions ?? false,
+      interactivePermissions: data.interactivePermissions ?? false,
     });
 
     return { success: true };
