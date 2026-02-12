@@ -2396,6 +2396,35 @@ export class WebsocketGateway
     return { success: true };
   }
 
+  // Permission rules sync from mobile — user's tool approval configuration
+  @SubscribeMessage('permission_rules_sync')
+  handlePermissionRulesSync(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: {
+      deviceId?: string;
+      sessionKey: string;
+      terminalSessionId: string;
+      rules: any[];
+    },
+  ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+
+    const targetDeviceId = data.deviceId || client.deviceId;
+    this.logger.log(
+      `Permission rules sync: ${data.rules?.length || 0} rule(s) for device ${targetDeviceId}`,
+    );
+
+    // Forward to the target device's CLI
+    this.server.to(`device:${targetDeviceId}`).emit('permission_rules_sync', {
+      ...data,
+      deviceId: targetDeviceId,
+    });
+
+    return { success: true };
+  }
+
   // Permission response from mobile — user approved or denied a tool use
   @SubscribeMessage('permission_response')
   handlePermissionResponse(
