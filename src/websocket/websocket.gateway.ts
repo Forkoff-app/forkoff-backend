@@ -1695,6 +1695,7 @@ export class WebsocketGateway
       deviceId: string;
       sessionKey: string;
       claudeSessionId?: string; // Can be passed directly from mobile
+      directory?: string; // Used by CLI to filter fallback sessions
       limit?: number;
       offset?: number;
     },
@@ -1824,6 +1825,7 @@ export class WebsocketGateway
       params: {
         claudeSessionId,
         sessionKey: data.sessionKey, // Pass original sessionKey so CLI can look it up
+        directory: data.directory, // Used by CLI to filter fallback sessions by project
         limit: data.limit ?? 400,
         offset: data.offset ?? 0,
       },
