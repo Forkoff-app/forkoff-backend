@@ -174,7 +174,7 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
   };
 
   const mockClaudeSessionsService = {
-    markAllInactive: jest.fn().mockResolvedValue(3),
+    markAllInactive: jest.fn().mockResolvedValue({ count: 3, sessionKeys: ['session-1', 'session-2', 'session-3'] }),
   };
 
   const mockPrismaService = {
@@ -246,6 +246,24 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
     await gateway.handleDisconnect(mobileClient);
 
     expect(mockClaudeSessionsService.markAllInactive).not.toHaveBeenCalled();
+  });
+
+  it('should emit claude_session_update for each inactivated session', async () => {
+    const cliClient = {
+      id: 'socket-cli-1',
+      userId: 'user-1',
+      deviceId: 'device-123',
+      clientType: 'session-scoped',
+      sessionId: 'session-1',
+    } as any;
+
+    await gateway.handleDisconnect(cliClient);
+
+    const sessionUpdates = emittedEvents.filter(e => e.event === 'claude_session_update');
+    expect(sessionUpdates.length).toBe(3);
+    expect(sessionUpdates.every(e => e.room === 'user:user-1')).toBe(true);
+    expect(sessionUpdates.every(e => e.data.state === 'inactive')).toBe(true);
+    expect(sessionUpdates.map(e => e.data.sessionKey).sort()).toEqual(['session-1', 'session-2', 'session-3']);
   });
 
   it('should still update device status even if markAllInactive fails', async () => {

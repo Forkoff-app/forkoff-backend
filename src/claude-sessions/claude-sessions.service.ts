@@ -436,8 +436,21 @@ export class ClaudeSessionsService implements OnModuleDestroy {
     return result.count;
   }
 
-  // Mark all sessions for a device as inactive
-  async markAllInactive(deviceId: string): Promise<number> {
+  // Mark all sessions for a device as inactive, returning affected session keys
+  async markAllInactive(deviceId: string): Promise<{ count: number; sessionKeys: string[] }> {
+    // First find the active sessions so we can return their keys
+    const activeSessions = await this.prisma.claudeSession.findMany({
+      where: {
+        deviceId,
+        state: ClaudeSessionState.ACTIVE,
+      },
+      select: { sessionKey: true },
+    });
+
+    if (activeSessions.length === 0) {
+      return { count: 0, sessionKeys: [] };
+    }
+
     const result = await this.prisma.claudeSession.updateMany({
       where: {
         deviceId,
@@ -447,7 +460,11 @@ export class ClaudeSessionsService implements OnModuleDestroy {
         state: ClaudeSessionState.INACTIVE,
       },
     });
-    return result.count;
+
+    return {
+      count: result.count,
+      sessionKeys: activeSessions.map(s => s.sessionKey),
+    };
   }
 
   // ==================== MESSAGE STORAGE ====================

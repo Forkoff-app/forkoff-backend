@@ -543,9 +543,20 @@ export class WebsocketGateway
 
         // Mark all Claude sessions as inactive when device goes offline
         try {
-          const inactivated = await this.claudeSessionsService.markAllInactive(client.deviceId);
-          if (inactivated > 0) {
-            this.logger.log(`Marked ${inactivated} session(s) inactive for device ${client.deviceId}`);
+          const { count, sessionKeys } = await this.claudeSessionsService.markAllInactive(client.deviceId);
+          if (count > 0) {
+            this.logger.log(`Marked ${count} session(s) inactive for device ${client.deviceId}`);
+            // Notify mobile clients so they update in-memory state
+            if (device.userId && device.userId !== 'pending') {
+              for (const sessionKey of sessionKeys) {
+                this.sendToUser(device.userId, 'claude_session_update', {
+                  sessionKey,
+                  deviceId: client.deviceId,
+                  state: 'inactive',
+                  lastUsedAt: new Date().toISOString(),
+                });
+              }
+            }
           }
         } catch (error) {
           this.logger.error(`Error marking sessions inactive: ${error}`);
