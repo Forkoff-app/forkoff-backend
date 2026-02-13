@@ -140,6 +140,7 @@ interface ClaudeMessagePayload {
       : true,
   },
   namespace: '/',
+  maxHttpBufferSize: 5e6, // 5MB - transcript history payloads can be large
 })
 export class WebsocketGateway
   implements OnGatewayConnection, OnGatewayDisconnect
@@ -539,6 +540,16 @@ export class WebsocketGateway
           client.deviceId,
           DeviceStatus.OFFLINE,
         );
+
+        // Mark all Claude sessions as inactive when device goes offline
+        try {
+          const inactivated = await this.claudeSessionsService.markAllInactive(client.deviceId);
+          if (inactivated > 0) {
+            this.logger.log(`Marked ${inactivated} session(s) inactive for device ${client.deviceId}`);
+          }
+        } catch (error) {
+          this.logger.error(`Error marking sessions inactive: ${error}`);
+        }
 
         // Notify user that device is offline
         if (device.userId && device.userId !== 'pending') {
@@ -1840,14 +1851,21 @@ export class WebsocketGateway
   @SubscribeMessage('transcript_history')
   handleTranscriptHistory(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: TranscriptHistoryPayload,
+    @MessageBody() data: TranscriptHistoryPayload & { requestedBy?: string },
   ): { success: true } | { error: string } {
     if (!client.deviceId) {
       return { error: 'Not authenticated as device' };
     }
 
-    // Broadcast to all subscribers of this transcript
-    this.server.to(`transcript:${data.sessionKey}`).emit('transcript_history', data);
+    // Send directly to the requesting user (works even if not in transcript room yet)
+    // This avoids the race condition where the mobile hasn't joined the transcript
+    // room yet, or has left it before the CLI response arrives.
+    if (data.requestedBy && data.requestedBy !== '__system_backfill__') {
+      this.sendToUser(data.requestedBy, 'transcript_history', data);
+    } else {
+      // Fallback: broadcast to room subscribers (for backfill or unknown requester)
+      this.server.to(`transcript:${data.sessionKey}`).emit('transcript_history', data);
+    }
 
     // Auto-set session name from the first user message in history
     if (client.deviceId && data.entries?.length > 0) {

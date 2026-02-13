@@ -156,3 +156,115 @@ describe('WebsocketGateway - Mobile Disconnect', () => {
     expect(disconnectEvents.length).toBe(0);
   });
 });
+
+describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
+  let gateway: WebsocketGateway;
+
+  const mockConfigService = {
+    get: jest.fn((key: string) => {
+      if (key === 'SUPABASE_URL') return 'http://localhost';
+      if (key === 'SUPABASE_SERVICE_KEY') return 'test-key';
+      return null;
+    }),
+  };
+
+  const mockDevicesService = {
+    updateStatus: jest.fn().mockResolvedValue({ userId: 'user-1' }),
+    findOne: jest.fn(),
+  };
+
+  const mockClaudeSessionsService = {
+    markAllInactive: jest.fn().mockResolvedValue(3),
+  };
+
+  const mockPrismaService = {
+    phoneSession: {
+      deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
+  };
+
+  const emittedEvents: Array<{ room: string; event: string; data: any }> = [];
+  const mockServer = {
+    to: jest.fn((room: string) => ({
+      emit: jest.fn((event: string, data: any) => {
+        emittedEvents.push({ room, event, data });
+      }),
+    })),
+    sockets: {
+      sockets: new Map(),
+    },
+  };
+
+  beforeEach(async () => {
+    emittedEvents.length = 0;
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        WebsocketGateway,
+        { provide: ConfigService, useValue: mockConfigService },
+        { provide: DevicesService, useValue: mockDevicesService },
+        { provide: ClaudeSessionsService, useValue: mockClaudeSessionsService },
+        { provide: NotificationsService, useValue: {} },
+        { provide: AnalyticsService, useValue: {} },
+        { provide: AchievementCheckerService, useValue: {} },
+        { provide: PromptQueueService, useValue: {} },
+        { provide: SubscriptionService, useValue: {} },
+        { provide: PrismaService, useValue: mockPrismaService },
+      ],
+    }).compile();
+
+    gateway = module.get<WebsocketGateway>(WebsocketGateway);
+    gateway['server'] = mockServer as any;
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('should call markAllInactive when a device disconnects', async () => {
+    const cliClient = {
+      id: 'socket-cli-1',
+      userId: 'user-1',
+      deviceId: 'device-123',
+      clientType: 'session-scoped',
+      sessionId: 'session-1',
+    } as any;
+
+    await gateway.handleDisconnect(cliClient);
+
+    expect(mockClaudeSessionsService.markAllInactive).toHaveBeenCalledWith('device-123');
+  });
+
+  it('should NOT call markAllInactive when a non-device client disconnects', async () => {
+    const mobileClient = {
+      id: 'socket-mobile-1',
+      userId: 'user-1',
+      clientType: 'user-scoped',
+      // No deviceId
+    } as any;
+
+    await gateway.handleDisconnect(mobileClient);
+
+    expect(mockClaudeSessionsService.markAllInactive).not.toHaveBeenCalled();
+  });
+
+  it('should still update device status even if markAllInactive fails', async () => {
+    mockClaudeSessionsService.markAllInactive.mockRejectedValueOnce(new Error('DB error'));
+
+    const cliClient = {
+      id: 'socket-cli-1',
+      userId: 'user-1',
+      deviceId: 'device-123',
+      clientType: 'session-scoped',
+      sessionId: 'session-1',
+    } as any;
+
+    await gateway.handleDisconnect(cliClient);
+
+    // Device status should still have been updated
+    expect(mockDevicesService.updateStatus).toHaveBeenCalledWith('device-123', 'OFFLINE');
+    // And the user should still be notified
+    const statusEvents = emittedEvents.filter(e => e.event === 'device_status');
+    expect(statusEvents.length).toBe(1);
+  });
+});
