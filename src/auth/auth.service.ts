@@ -157,9 +157,25 @@ export class AuthService {
   }
 
   /**
-   * Register a device fingerprint for a user after successful signup.
+   * Register a device fingerprint for a user after successful signup or login.
+   * Skips if this user already has this fingerprint registered (avoids duplicates on repeated logins).
    */
   async registerDeviceFingerprint(userId: string, fingerprintHash: string): Promise<void> {
+    // Check if this exact user+fingerprint combo already exists
+    const existing = await this.prisma.deviceFingerprint.findFirst({
+      where: { userId, fingerprintHash },
+    });
+
+    if (existing) {
+      // Update the timestamp so the 40-day cooldown is refreshed from latest login
+      await this.prisma.deviceFingerprint.update({
+        where: { id: existing.id },
+        data: { registeredAt: new Date() },
+      });
+      this.logger.log(`Device fingerprint refreshed for user ${userId}`);
+      return;
+    }
+
     await this.prisma.deviceFingerprint.create({
       data: {
         userId,

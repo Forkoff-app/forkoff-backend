@@ -10,6 +10,7 @@ describe('AuthService - Device Fingerprint', () => {
     deviceFingerprint: {
       findFirst: jest.fn(),
       create: jest.fn(),
+      update: jest.fn(),
     },
     user: {
       findUnique: jest.fn(),
@@ -159,7 +160,8 @@ describe('AuthService - Device Fingerprint', () => {
   });
 
   describe('registerDeviceFingerprint', () => {
-    it('should create a fingerprint record', async () => {
+    it('should create a new fingerprint when none exists for this user+hash', async () => {
+      mockPrismaService.deviceFingerprint.findFirst.mockResolvedValue(null);
       mockPrismaService.deviceFingerprint.create.mockResolvedValue({
         id: 'fp-1',
         userId: 'user-1',
@@ -175,6 +177,24 @@ describe('AuthService - Device Fingerprint', () => {
           fingerprintHash: 'myhash',
         },
       });
+    });
+
+    it('should refresh timestamp when fingerprint already exists for this user', async () => {
+      mockPrismaService.deviceFingerprint.findFirst.mockResolvedValue({
+        id: 'fp-existing',
+        userId: 'user-1',
+        fingerprintHash: 'myhash',
+        registeredAt: new Date('2025-01-01'),
+      });
+      mockPrismaService.deviceFingerprint.update.mockResolvedValue({});
+
+      await service.registerDeviceFingerprint('user-1', 'myhash');
+
+      expect(mockPrismaService.deviceFingerprint.update).toHaveBeenCalledWith({
+        where: { id: 'fp-existing' },
+        data: { registeredAt: expect.any(Date) },
+      });
+      expect(mockPrismaService.deviceFingerprint.create).not.toHaveBeenCalled();
     });
   });
 });
