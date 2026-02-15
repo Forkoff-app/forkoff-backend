@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as nodemailer from 'nodemailer';
-import { Transporter } from 'nodemailer';
+import { Resend } from 'resend';
 
 export interface EmailOptions {
   to: string;
@@ -13,53 +12,47 @@ export interface EmailOptions {
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
-  private transporter: Transporter | null = null;
+  private resend: Resend | null = null;
+  private from: string;
 
   constructor(private configService: ConfigService) {
-    this.initializeTransporter();
-  }
+    const apiKey = this.configService.get<string>('RESEND_API_KEY');
+    this.from =
+      this.configService.get<string>('SMTP_FROM') ||
+      'ForkOff <noreply@forkoff.app>';
 
-  private initializeTransporter() {
-    const host = this.configService.get<string>('SMTP_HOST');
-    const port = this.configService.get<number>('SMTP_PORT');
-    const user = this.configService.get<string>('SMTP_USER');
-    const pass = this.configService.get<string>('SMTP_PASS');
-    const from = this.configService.get<string>('SMTP_FROM');
-
-    if (!host || !port || !user || !pass) {
-      this.logger.warn('SMTP credentials not configured - email sending disabled');
+    if (!apiKey) {
+      this.logger.warn(
+        'RESEND_API_KEY not configured - email sending disabled',
+      );
       return;
     }
 
-    this.transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465, // true for 465, false for other ports
-      auth: {
-        user,
-        pass,
-      },
-    });
-
-    this.logger.log('Email service initialized');
+    this.resend = new Resend(apiKey);
+    this.logger.log('Email service initialized (Resend)');
   }
 
   async sendEmail(options: EmailOptions): Promise<boolean> {
-    if (!this.transporter) {
-      this.logger.warn('Email sending skipped - transporter not initialized');
+    if (!this.resend) {
+      this.logger.warn('Email sending skipped - Resend not initialized');
       return false;
     }
 
     try {
-      const from = this.configService.get<string>('SMTP_FROM');
-
-      await this.transporter.sendMail({
-        from: from || options.to, // Fallback to recipient if from not configured
+      const { error } = await this.resend.emails.send({
+        from: this.from,
         to: options.to,
         subject: options.subject,
-        text: options.text,
         html: options.html,
+        text: options.text,
       });
+
+      if (error) {
+        this.logger.error(
+          `Failed to send email to ${options.to}: ${error.message}`,
+        );
+        return false;
+      }
 
       this.logger.log(`Email sent to ${options.to}: ${options.subject}`);
       return true;
@@ -119,7 +112,7 @@ export class EmailService {
                   <tr>
                     <td style="padding: 20px 40px; border-top: 1px solid #e5e5e5; text-align: center;">
                       <p style="margin: 0; font-size: 12px; color: #9a9a9a;">
-                        © ${new Date().getFullYear()} ForkOff. All rights reserved.
+                        &copy; ${new Date().getFullYear()} ForkOff. All rights reserved.
                       </p>
                     </td>
                   </tr>
@@ -208,7 +201,7 @@ Questions? support@forkoff.app
                   <tr>
                     <td style="padding: 20px 40px; border-top: 1px solid #e5e5e5; text-align: center;">
                       <p style="margin: 0; font-size: 12px; color: #9a9a9a;">
-                        © ${new Date().getFullYear()} ForkOff. All rights reserved.
+                        &copy; ${new Date().getFullYear()} ForkOff. All rights reserved.
                       </p>
                     </td>
                   </tr>

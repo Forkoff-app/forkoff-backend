@@ -24,6 +24,7 @@ interface SecretPayload {
   SMTP_USER?: string;
   SMTP_PASS?: string;
   SMTP_FROM?: string;
+  RESEND_API_KEY?: string;
 }
 
 const SECRET_NAME = 'forkoff-api';
