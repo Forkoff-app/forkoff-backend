@@ -210,6 +210,46 @@ async function main() {
   }
 
   console.log(`\nSeeded ${ACHIEVEMENT_DEFINITIONS.length} achievements successfully!`);
+
+  // Seed subscription limits into app_config
+  console.log('\nSeeding subscription limits...');
+  await prisma.appConfig.upsert({
+    where: { key: 'subscription-limits' },
+    update: {},  // Don't overwrite if already exists (admin may have customized)
+    create: {
+      key: 'subscription-limits',
+      value: {
+        free: {
+          messagesPerDay: 10,
+          sessionsPerMonth: 10,
+          maxProjects: 2,
+          maxDevices: 1,
+          repairsPerMonth: 3,
+          historyRetentionDays: 7,
+        },
+        pro: {
+          messagesPerDay: -1,
+          sessionsPerMonth: -1,
+          maxProjects: -1,
+          maxDevices: -1,
+          repairsPerMonth: -1,
+          historyRetentionDays: -1,
+          maxPhoneSessions: 1,
+        },
+        team: {
+          messagesPerDay: -1,
+          sessionsPerMonth: -1,
+          maxProjects: -1,
+          maxDevices: -1,
+          repairsPerMonth: -1,
+          historyRetentionDays: -1,
+          maxPhoneSessions: 1,
+        },
+      },
+      description: 'Subscription tier limits (-1 = unlimited)',
+    },
+  });
+  console.log('  - subscription-limits seeded');
 }
 
 main()

@@ -2,21 +2,42 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import {
-  FREE_LIMITS,
-  PRO_LIMITS,
-  TEAM_LIMITS,
   LimitType,
   SubscriptionLimits,
   SubscriptionTier,
   getLimitsForTier,
 } from './constants';
 import { LimitCheckResponseDto } from './dto';
+import {
+  AppConfigService,
+  TierLimits,
+} from '../app-config/app-config.service';
+
+/**
+ * Map a TierLimits object from the DB (where -1 means unlimited)
+ * to a SubscriptionLimits object (where Infinity means unlimited).
+ */
+function mapTierLimits(tier: TierLimits): SubscriptionLimits {
+  const map = (v: number) => (v === -1 ? Infinity : v);
+  return {
+    messagesPerDay: map(tier.messagesPerDay),
+    sessionsPerMonth: map(tier.sessionsPerMonth),
+    maxProjects: map(tier.maxProjects),
+    maxDevices: map(tier.maxDevices),
+    repairsPerMonth: map(tier.repairsPerMonth),
+    historyRetentionDays: map(tier.historyRetentionDays),
+    maxPhoneSessions: tier.maxPhoneSessions != null ? map(tier.maxPhoneSessions) : undefined,
+  };
+}
 
 @Injectable()
 export class SubscriptionService {
   private readonly logger = new Logger(SubscriptionService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private appConfigService: AppConfigService,
+  ) {}
 
   /**
    * Get or create usage record for a user
@@ -63,7 +84,8 @@ export class SubscriptionService {
   }
 
   /**
-   * Get limits based on user's subscription tier
+   * Get limits based on user's subscription tier.
+   * Reads from AppConfig DB first, falls back to hardcoded constants.
    */
   async getLimitsForUser(userId: string): Promise<SubscriptionLimits> {
     const user = await this.prisma.user.findUnique({
@@ -73,13 +95,28 @@ export class SubscriptionService {
 
     // Check if user has active PRO status (from vouchers/referrals)
     const hasActivePro = await this.checkProStatus(userId);
-    if (hasActivePro && user?.subscription === 'free') {
-      // User has PRO from voucher/referral but subscription field is 'free'
-      return getLimitsForTier('pro');
-    }
+    const tier: SubscriptionTier =
+      hasActivePro && user?.subscription === 'free'
+        ? 'pro'
+        : ((user?.subscription || 'free') as SubscriptionTier);
 
-    const tier = (user?.subscription || 'free') as SubscriptionTier;
-    return getLimitsForTier(tier);
+    return this.getLimitsForTier(tier);
+  }
+
+  /**
+   * Get limits for a specific tier from AppConfig (DB) with hardcoded fallback.
+   */
+  async getLimitsForTier(tier: SubscriptionTier): Promise<SubscriptionLimits> {
+    try {
+      const config = await this.appConfigService.getSubscriptionLimits();
+      const tierConfig = config[tier] || config.free;
+      return mapTierLimits(tierConfig);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to read subscription limits from DB, using hardcoded fallback: ${error}`,
+      );
+      return getLimitsForTier(tier);
+    }
   }
 
   /**

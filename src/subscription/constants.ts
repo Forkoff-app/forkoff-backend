@@ -1,7 +1,7 @@
 // Subscription tier limits
 
 export const FREE_LIMITS = {
-  messagesPerDay: 20,
+  messagesPerDay: 10,
   sessionsPerMonth: 10,
   maxProjects: 2,
   maxDevices: 1,

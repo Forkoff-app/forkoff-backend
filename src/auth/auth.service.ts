@@ -120,6 +120,66 @@ export class AuthService {
     }
   }
 
+  // ==================== DEVICE FINGERPRINT ====================
+
+  /**
+   * Check if a device fingerprint is allowed to register or log in.
+   * If `email` is provided (login flow), allows access if the fingerprint belongs to that email's account.
+   * If no `email` (registration flow), blocks if fingerprint is registered to ANY account within 40 days.
+   */
+  async checkDeviceRegistration(fingerprintHash: string, email?: string): Promise<{ allowed: boolean; message?: string }> {
+    const COOLDOWN_DAYS = 40;
+    const cutoff = new Date(Date.now() - COOLDOWN_DAYS * 24 * 60 * 60 * 1000);
+
+    const existing = await this.prisma.deviceFingerprint.findFirst({
+      where: {
+        fingerprintHash,
+        registeredAt: { gte: cutoff },
+      },
+      orderBy: { registeredAt: 'desc' },
+      include: { user: { select: { email: true } } },
+    });
+
+    if (existing) {
+      // If email provided (login flow), allow if it's the same user's device
+      if (email && existing.user.email.toLowerCase() === email.toLowerCase()) {
+        return { allowed: true };
+      }
+
+      const maskedEmail = this.maskEmail(existing.user.email);
+      const message = email
+        ? `This device is linked to another account (${maskedEmail}). You can only use one account per device.`
+        : `You already have an existing account (${maskedEmail}). Please log in instead.`;
+      return { allowed: false, message };
+    }
+
+    return { allowed: true };
+  }
+
+  /**
+   * Register a device fingerprint for a user after successful signup.
+   */
+  async registerDeviceFingerprint(userId: string, fingerprintHash: string): Promise<void> {
+    await this.prisma.deviceFingerprint.create({
+      data: {
+        userId,
+        fingerprintHash,
+      },
+    });
+    this.logger.log(`Device fingerprint registered for user ${userId}`);
+  }
+
+  /**
+   * Mask an email address: show first 2 chars of local part + domain.
+   * e.g. "john@example.com" → "jo***@example.com"
+   */
+  private maskEmail(email: string): string {
+    const [local, domain] = email.split('@');
+    if (!local || !domain) return '***@***';
+    const visible = local.substring(0, 2);
+    return `${visible}***@${domain}`;
+  }
+
   async deleteAccount(userId: string): Promise<void> {
     this.logger.log(`Deleting account for user: ${userId}`);
 

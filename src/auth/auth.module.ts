@@ -5,6 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
+import { DeviceRegistrationController } from './device-registration.controller';
 import { AppConfigModule } from '../app-config/app-config.module';
 import { GeoIpModule } from '../geo-ip/geo-ip.module';
 
@@ -22,7 +23,7 @@ import { GeoIpModule } from '../geo-ip/geo-ip.module';
     AppConfigModule,
     GeoIpModule,
   ],
-  controllers: [AuthController],
+  controllers: [AuthController, DeviceRegistrationController],
   providers: [AuthService, JwtStrategy],
   exports: [AuthService, JwtModule],
 })

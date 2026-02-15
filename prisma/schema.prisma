@@ -44,6 +44,7 @@ model User {
   voucherRedemptions VoucherRedemption[]
   referralProfile  ReferralProfile?
   referredBy       Referral?     @relation("ReferredUser")
+  deviceFingerprints DeviceFingerprint[]
 
   @@map("users")
 }
@@ -531,4 +532,16 @@ model Referral {
 
   @@index([referrerProfileId])
   @@map("referrals")
+}
+
+// Device fingerprint for one-account-per-device enforcement
+model DeviceFingerprint {
+  id              String   @id @default(uuid())
+  fingerprintHash String   // SHA-256 of hardware identifiers
+  userId          String
+  registeredAt    DateTime @default(now())
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([fingerprintHash])
+  @@map("device_fingerprints")
 }

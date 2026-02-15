@@ -232,40 +232,42 @@ export class WebsocketGateway
       }
 
       // Handle phone session tracking for user-scoped (mobile) connections
+      // Enforced for ALL users — only one mobile device per account
       const clientType = client.handshake.auth?.clientType as 'user-scoped' | 'session-scoped' | undefined;
       if (clientType === 'user-scoped' && client.userId) {
         try {
-          // Check user's subscription tier
-          const user = await this.prisma.user.findUnique({
-            where: { id: client.userId },
-            select: { subscription: true },
+          const deviceName = (client.handshake.auth?.deviceName as string) || 'Unknown device';
+
+          // Check for existing phone session
+          const existingSession = await this.prisma.phoneSession.findUnique({
+            where: { userId: client.userId },
           });
 
-          if (user?.subscription === 'pro' || user?.subscription === 'team') {
-            // Check for existing phone session
-            const existingSession = await this.prisma.phoneSession.findUnique({
-              where: { userId: client.userId },
-            });
-
-            if (existingSession && existingSession.socketId !== client.id) {
-              // Emit conflict event to new connection
-              client.emit('phone_session_conflict', {
-                existingDeviceId: existingSession.deviceInfo,
-                message: 'Your account is active on another device',
+          if (existingSession && existingSession.socketId !== client.id) {
+            // Auto-kick the old device: emit session_claimed to the OLD socket
+            const oldSocket = this.server.sockets.sockets.get(existingSession.socketId);
+            if (oldSocket) {
+              oldSocket.emit('session_claimed', {
+                message: `Your session was claimed by ${deviceName}`,
               });
-              this.logger.log(
-                `Phone session conflict for user ${client.userId}: existing socket ${existingSession.socketId}`,
-              );
-            } else {
-              // Register this phone session
-              await this.prisma.phoneSession.upsert({
-                where: { userId: client.userId },
-                update: { socketId: client.id, lastActiveAt: new Date() },
-                create: { userId: client.userId, socketId: client.id },
-              });
-              this.logger.log(`Phone session registered for user ${client.userId}`);
+              // Disconnect old socket after a short delay to ensure the event is delivered
+              setTimeout(() => {
+                oldSocket.disconnect(true);
+              }, 500);
             }
+
+            this.logger.log(
+              `Phone session auto-claimed for user ${client.userId}: kicked socket ${existingSession.socketId}, new socket ${client.id}`,
+            );
           }
+
+          // Upsert new phone session (always register, whether first or replacement)
+          await this.prisma.phoneSession.upsert({
+            where: { userId: client.userId },
+            update: { socketId: client.id, deviceInfo: deviceName, lastActiveAt: new Date() },
+            create: { userId: client.userId, socketId: client.id, deviceInfo: deviceName },
+          });
+          this.logger.log(`Phone session registered for user ${client.userId} (${deviceName})`);
         } catch (error) {
           this.logger.error(`Error handling phone session: ${error}`);
         }
