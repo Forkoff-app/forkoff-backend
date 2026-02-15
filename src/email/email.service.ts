@@ -19,7 +19,7 @@ export class EmailService {
     const apiKey = this.configService.get<string>('RESEND_API_KEY');
     this.from =
       this.configService.get<string>('SMTP_FROM') ||
-      'ForkOff <noreply@forkoff.app>';
+      'ForkOff <hello@forkoff.app>';
 
     if (!apiKey) {
       this.logger.warn(
