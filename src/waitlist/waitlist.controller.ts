@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagg
 import { WaitlistService } from './waitlist.service';
 import { AddToWaitlistDto } from './dto/add-to-waitlist.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { AdminGuard } from '../auth/guards/admin.guard';
 import { SkipThrottle, Throttle } from '@nestjs/throttler';
 
 @ApiTags('waitlist')
@@ -28,6 +29,16 @@ export class WaitlistController {
   @ApiResponse({ status: 200, description: 'Beta access granted' })
   async grantBetaAccess(@Body() dto: AddToWaitlistDto) {
     return this.waitlistService.grantBetaAccess(dto.email);
+  }
+
+  @Post('resend-all')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @ApiBearerAuth('supabase-auth')
+  @ApiOperation({ summary: 'Resend confirmation emails to all waitlist entries (admin only)' })
+  @ApiResponse({ status: 200, description: 'Resend results' })
+  async resendAll() {
+    return this.waitlistService.resendAllConfirmations();
   }
 
   @Get('stats')

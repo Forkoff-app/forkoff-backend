@@ -127,6 +127,47 @@ export class WaitlistService {
   }
 
   /**
+   * Resend confirmation emails to ALL waitlist entries.
+   * Resets confirmationSent flag and sends to everyone.
+   */
+  async resendAllConfirmations(): Promise<{ total: number; sent: number; failed: number }> {
+    // Reset all confirmation flags so we re-send to everyone
+    await this.prisma.waitlist.updateMany({
+      data: { confirmationSent: false },
+    });
+
+    const allEntries = await this.prisma.waitlist.findMany({
+      orderBy: { createdAt: 'asc' },
+    });
+
+    this.logger.log(`Resending confirmation emails to ${allEntries.length} entries...`);
+
+    let sent = 0;
+    let failed = 0;
+
+    for (const entry of allEntries) {
+      try {
+        const success = await this.emailService.sendWaitlistConfirmation(entry.email);
+        if (success) {
+          await this.prisma.waitlist.update({
+            where: { id: entry.id },
+            data: { confirmationSent: true },
+          });
+          sent++;
+        } else {
+          failed++;
+        }
+      } catch (error) {
+        this.logger.error(`Failed to resend to ${entry.email}:`, error);
+        failed++;
+      }
+    }
+
+    this.logger.log(`Resend complete: ${sent} sent, ${failed} failed out of ${allEntries.length}`);
+    return { total: allEntries.length, sent, failed };
+  }
+
+  /**
    * Cron job that runs every hour to retry sending confirmation emails
    * to waitlist entries where confirmation email wasn't sent
    */
