@@ -33,7 +33,9 @@ export class WaitlistController {
 
   @Post('resend-all')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Resend confirmation emails to all waitlist entries' })
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @ApiBearerAuth('supabase-auth')
+  @ApiOperation({ summary: 'Resend confirmation emails to all waitlist entries (admin only)' })
   @ApiResponse({ status: 200, description: 'Resend results' })
   async resendAll() {
     return this.waitlistService.resendAllConfirmations();
