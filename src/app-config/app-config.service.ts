@@ -58,6 +58,86 @@ const DEFAULT_CLI_VERSION_CONFIG: CliVersionConfig = {
   updateMessage: 'Please update the ForkOff CLI to continue.',
 };
 
+export interface PlanFeatureConfig {
+  name: string;
+  included: boolean;
+}
+
+export interface SubscriptionPlanConfig {
+  id: string;
+  name: string;
+  tier: 'free' | 'pro';
+  price: number;
+  originalPrice?: number;
+  currency: string;
+  interval: 'month' | 'year';
+  features: PlanFeatureConfig[];
+  popular?: boolean;
+  badge?: string;
+  stripePriceId?: string;
+  productId: { ios: string; android: string };
+}
+
+export interface SubscriptionPlansConfig {
+  plans: SubscriptionPlanConfig[];
+  promotionBanner?: {
+    text: string;
+    backgroundColor?: string;
+    textColor?: string;
+    expiresAt?: string;
+  };
+  allowPromotionCodes: boolean;
+}
+
+const DEFAULT_PLANS: SubscriptionPlansConfig = {
+  plans: [
+    {
+      id: 'free',
+      name: 'Free',
+      tier: 'free',
+      price: 0,
+      currency: 'USD',
+      interval: 'month',
+      features: [],
+      productId: { ios: '', android: '' },
+    },
+    {
+      id: 'pro_monthly',
+      name: 'Pro Monthly',
+      tier: 'pro',
+      price: 9.99,
+      currency: 'USD',
+      interval: 'month',
+      popular: true,
+      features: [
+        { name: 'Unlimited messages', included: true },
+        { name: 'Unlimited sessions', included: true },
+        { name: 'Unlimited projects', included: true },
+        { name: 'Unlimited paired PCs', included: true },
+        { name: 'Unlimited re-pairs', included: true },
+        { name: 'Full history retention', included: true },
+        { name: 'Single phone session', included: true },
+      ],
+      productId: { ios: 'com.forkoff.pro.monthly', android: 'com.forkoff.pro.monthly' },
+    },
+    {
+      id: 'pro_yearly',
+      name: 'Pro Yearly',
+      tier: 'pro',
+      price: 99.99,
+      currency: 'USD',
+      interval: 'year',
+      badge: 'BEST VALUE',
+      features: [
+        { name: 'Everything in Pro Monthly', included: true },
+        { name: '2 months free', included: true },
+      ],
+      productId: { ios: 'com.forkoff.pro.yearly', android: 'com.forkoff.pro.yearly' },
+    },
+  ],
+  allowPromotionCodes: true,
+};
+
 @Injectable()
 export class AppConfigService {
   private readonly logger = new Logger(AppConfigService.name);
@@ -160,6 +240,29 @@ export class AppConfigService {
       'subscription-limits',
       updated,
       'Subscription tier limits (-1 = unlimited)',
+    );
+  }
+
+  async getSubscriptionPlans(): Promise<SubscriptionPlansConfig> {
+    return this.getConfig<SubscriptionPlansConfig>(
+      'subscription-plans',
+      DEFAULT_PLANS,
+    );
+  }
+
+  async setSubscriptionPlans(
+    config: Partial<SubscriptionPlansConfig>,
+  ): Promise<SubscriptionPlansConfig> {
+    const current = await this.getSubscriptionPlans();
+    const updated: SubscriptionPlansConfig = {
+      ...current,
+      ...config,
+      plans: config.plans ?? current.plans,
+    };
+    return this.setConfig(
+      'subscription-plans',
+      updated,
+      'Subscription plan definitions and promotion settings',
     );
   }
 

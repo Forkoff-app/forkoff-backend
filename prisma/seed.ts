@@ -241,6 +241,66 @@ async function main() {
     },
   });
   console.log('  - subscription-limits seeded');
+
+  // Seed subscription plans into app_config
+  console.log('\nSeeding subscription plans...');
+  await prisma.appConfig.upsert({
+    where: { key: 'subscription-plans' },
+    update: {},  // Don't overwrite if already exists (admin may have customized)
+    create: {
+      key: 'subscription-plans',
+      value: {
+        plans: [
+          {
+            id: 'free',
+            name: 'Free',
+            tier: 'free',
+            price: 0,
+            currency: 'USD',
+            interval: 'month',
+            features: [],
+            productId: { ios: '', android: '' },
+          },
+          {
+            id: 'pro_monthly',
+            name: 'Pro Monthly',
+            tier: 'pro',
+            price: 9.99,
+            currency: 'USD',
+            interval: 'month',
+            popular: true,
+            features: [
+              { name: 'Unlimited messages', included: true },
+              { name: 'Unlimited sessions', included: true },
+              { name: 'Unlimited projects', included: true },
+              { name: 'Unlimited paired PCs', included: true },
+              { name: 'Unlimited re-pairs', included: true },
+              { name: 'Full history retention', included: true },
+              { name: 'Single phone session', included: true },
+            ],
+            productId: { ios: 'com.forkoff.pro.monthly', android: 'com.forkoff.pro.monthly' },
+          },
+          {
+            id: 'pro_yearly',
+            name: 'Pro Yearly',
+            tier: 'pro',
+            price: 99.99,
+            currency: 'USD',
+            interval: 'year',
+            badge: 'BEST VALUE',
+            features: [
+              { name: 'Everything in Pro Monthly', included: true },
+              { name: '2 months free', included: true },
+            ],
+            productId: { ios: 'com.forkoff.pro.yearly', android: 'com.forkoff.pro.yearly' },
+          },
+        ],
+        allowPromotionCodes: true,
+      },
+      description: 'Subscription plan definitions and promotion settings',
+    },
+  });
+  console.log('  - subscription-plans seeded');
 }
 
 main()

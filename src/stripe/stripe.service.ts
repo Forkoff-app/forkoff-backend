@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { AppConfigService } from '../app-config/app-config.service';
 import Stripe from 'stripe';
 
 @Injectable()
@@ -11,6 +12,7 @@ export class StripeService {
   constructor(
     private prisma: PrismaService,
     private configService: ConfigService,
+    private appConfigService: AppConfigService,
   ) {
     const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
     if (!secretKey) {
@@ -60,9 +62,26 @@ export class StripeService {
     userId: string,
     priceId: string,
   ): Promise<{ url: string }> {
-    const allowedPriceIds = [
+    // Build allowed price IDs from env var + DB plans
+    const envPriceIds = [
       this.configService.get<string>('STRIPE_PRO_PRICE_ID'),
-    ].filter(Boolean);
+    ].filter(Boolean) as string[];
+
+    let allowedPriceIds = [...envPriceIds];
+    let allowPromotionCodes = true;
+
+    try {
+      const plansConfig = await this.appConfigService.getSubscriptionPlans();
+      const dbPriceIds = plansConfig.plans
+        .map((p) => p.stripePriceId)
+        .filter(Boolean) as string[];
+      allowedPriceIds = [...new Set([...envPriceIds, ...dbPriceIds])];
+      allowPromotionCodes = plansConfig.allowPromotionCodes;
+    } catch (error) {
+      this.logger.warn(
+        `Failed to read plans config from DB, using env-only price validation: ${error}`,
+      );
+    }
 
     if (!allowedPriceIds.includes(priceId)) {
       throw new BadRequestException('Invalid price ID');
@@ -76,6 +95,7 @@ export class StripeService {
       line_items: [{ price: priceId, quantity: 1 }],
       success_url: 'https://forkoff.app/?checkout=success',
       cancel_url: 'https://forkoff.app/?checkout=cancelled',
+      allow_promotion_codes: allowPromotionCodes,
       subscription_data: {
         metadata: { userId },
       },
