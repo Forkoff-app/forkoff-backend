@@ -148,8 +148,8 @@ export class AuthService {
 
       const maskedEmail = this.maskEmail(existing.user.email);
       const message = email
-        ? `This device is linked to another account (${maskedEmail}). You can only use one account per device.`
-        : `You already have an existing account (${maskedEmail}). Please log in instead.`;
+        ? `This device is linked to another account (${maskedEmail}). You can only use one account per device.\n\nIf this is a mistake, contact support.`
+        : `You already have an existing account (${maskedEmail}). Please log in instead.\n\nIf this is a mistake, contact support.`;
       return { allowed: false, message };
     }
 
