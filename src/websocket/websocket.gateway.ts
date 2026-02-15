@@ -28,6 +28,7 @@ interface AuthenticatedSocket extends Socket {
   isDevice?: boolean; // true if connection is from CLI tool, false if from mobile app
   clientType?: 'user-scoped' | 'session-scoped'; // Connection scoping type
   sessionId?: string; // Session ID for session-scoped connections
+  cliVersion?: string; // CLI version from handshake auth
 }
 
 // Chat message payload from AI tool
@@ -277,8 +278,10 @@ export class WebsocketGateway
       const sessionId = client.handshake.auth?.sessionId as string | undefined;
       const deviceId = client.handshake.auth?.deviceId;
       const authUserId = client.handshake.auth?.userId as string | undefined; // userId passed by CLI
+      const cliVersion = client.handshake.auth?.cliVersion as string | undefined;
 
       client.clientType = clientType;
+      client.cliVersion = cliVersion;
 
       // Handle session-scoped connections (CLI per session - the Happy-Reference pattern)
       if (clientType === 'session-scoped' && sessionId) {
@@ -315,6 +318,7 @@ export class WebsocketGateway
               this.server.to(`user:${device.userId}`).emit('device_status', {
                 deviceId,
                 status: DeviceStatus.ONLINE,
+                cliVersion,
               });
               this.server.to(`user:${device.userId}`).emit('session_connected', {
                 deviceId,
@@ -351,6 +355,7 @@ export class WebsocketGateway
                 this.server.to(`user:${effectiveUserId}`).emit('device_status', {
                   deviceId,
                   status: DeviceStatus.ONLINE,
+                  cliVersion,
                 });
                 this.server.to(`user:${effectiveUserId}`).emit('session_connected', {
                   deviceId,
@@ -428,6 +433,7 @@ export class WebsocketGateway
             this.server.to(`user:${device.userId}`).emit('device_status', {
               deviceId,
               status: DeviceStatus.ONLINE,
+              cliVersion,
             });
           }
         } catch (error) {
@@ -460,6 +466,7 @@ export class WebsocketGateway
               this.server.to(`user:${effectiveUserId}`).emit('device_status', {
                 deviceId,
                 status: DeviceStatus.ONLINE,
+                cliVersion,
               });
             } catch (autoRegisterError) {
               this.logger.error(`Failed to auto-register device: ${autoRegisterError}`);
@@ -569,6 +576,7 @@ export class WebsocketGateway
           this.server.to(`user:${device.userId}`).emit('device_status', {
             deviceId: client.deviceId,
             status: DeviceStatus.OFFLINE,
+            cliVersion: client.cliVersion,
           });
         }
       } catch (error) {
@@ -707,6 +715,7 @@ export class WebsocketGateway
         deviceId: client.deviceId,
         status,
         lastSeenAt: device.lastSeenAt,
+        cliVersion: client.cliVersion,
       });
     }
 
@@ -734,6 +743,7 @@ export class WebsocketGateway
       this.server.to(`user:${device.userId}`).emit('device_status', {
         deviceId: client.deviceId,
         status,
+        cliVersion: client.cliVersion,
       });
     }
 

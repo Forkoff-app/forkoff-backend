@@ -7,6 +7,11 @@ export interface VersionConfig {
   updateMessage?: string;
 }
 
+export interface CliVersionConfig {
+  minCliVersion: string;
+  updateMessage?: string;
+}
+
 export interface TierLimits {
   messagesPerDay: number;
   sessionsPerMonth: number;
@@ -56,6 +61,11 @@ const DEFAULT_VERSION_CONFIG: VersionConfig = {
   minVersion: '1.0.0',
   forceUpdate: false,
   updateMessage: 'Please update to the latest version for new features and improvements.',
+};
+
+const DEFAULT_CLI_VERSION_CONFIG: CliVersionConfig = {
+  minCliVersion: '1.0.0',
+  updateMessage: 'Please update the ForkOff CLI to continue.',
 };
 
 @Injectable()
@@ -132,6 +142,13 @@ export class AppConfigService {
     });
 
     return value;
+  }
+
+  async getCliVersionConfig(): Promise<CliVersionConfig> {
+    return this.getConfig<CliVersionConfig>(
+      'cli-version',
+      DEFAULT_CLI_VERSION_CONFIG,
+    );
   }
 
   async getSubscriptionLimits(): Promise<SubscriptionLimitsConfig> {

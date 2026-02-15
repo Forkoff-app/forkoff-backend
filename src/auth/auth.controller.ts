@@ -51,16 +51,18 @@ export class AuthController {
       this.logger.error('Failed to update country:', err);
     });
 
-    const [profile, versionConfig, subscriptionLimits] = await Promise.all([
+    const [profile, versionConfig, subscriptionLimits, cliVersionConfig] = await Promise.all([
       this.authService.getProfile(user.id),
       this.appConfigService.getVersionConfig(),
       this.appConfigService.getSubscriptionLimits(),
+      this.appConfigService.getCliVersionConfig(),
     ]);
 
     return {
       ...profile,
       appConfig: versionConfig,
       subscriptionLimits,
+      cliVersionConfig,
     };
   }
 
