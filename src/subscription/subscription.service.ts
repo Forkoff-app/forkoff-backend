@@ -143,7 +143,7 @@ export class SubscriptionService {
     }
 
     // Check if user has active PRO subscription
-    if (user.subscription === 'pro' || user.subscription === 'team') {
+    if (user.subscription === 'pro') {
       return true;
     }
 
@@ -268,7 +268,7 @@ export class SubscriptionService {
           select: { subscription: true },
         });
         const isPro =
-          user?.subscription === 'pro' || user?.subscription === 'team';
+          user?.subscription === 'pro';
         return {
           allowed: isPro,
           limitType,

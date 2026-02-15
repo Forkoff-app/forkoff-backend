@@ -19,11 +19,7 @@ export const PRO_LIMITS = {
   maxPhoneSessions: 1,
 };
 
-export const TEAM_LIMITS = {
-  ...PRO_LIMITS,
-};
-
-export type SubscriptionTier = 'free' | 'pro' | 'team';
+export type SubscriptionTier = 'free' | 'pro';
 
 export type LimitType =
   | 'messages_daily'
@@ -47,8 +43,6 @@ export function getLimitsForTier(tier: SubscriptionTier): SubscriptionLimits {
   switch (tier) {
     case 'pro':
       return PRO_LIMITS;
-    case 'team':
-      return TEAM_LIMITS;
     default:
       return FREE_LIMITS;
   }

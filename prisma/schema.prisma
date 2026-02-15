@@ -18,7 +18,7 @@ model User {
   username         String?       @unique
   name             String?
   avatarUrl        String?
-  subscription     String        @default("free") // free, pro, team
+  subscription     String        @default("free") // free, pro
   proExpiresAt     DateTime?     // When PRO subscription expires (for voucher/referral benefits)
   isLifetimePro    Boolean       @default(false) // Permanent PRO access from lifetime voucher
   stripeCustomerId       String?   @unique

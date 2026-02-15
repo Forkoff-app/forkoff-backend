@@ -25,7 +25,6 @@ export interface TierLimits {
 export interface SubscriptionLimitsConfig {
   free: TierLimits;
   pro: TierLimits;
-  team: TierLimits;
 }
 
 const DEFAULT_SUBSCRIPTION_LIMITS: SubscriptionLimitsConfig = {
@@ -38,15 +37,6 @@ const DEFAULT_SUBSCRIPTION_LIMITS: SubscriptionLimitsConfig = {
     historyRetentionDays: 7,
   },
   pro: {
-    messagesPerDay: -1,
-    sessionsPerMonth: -1,
-    maxProjects: -1,
-    maxDevices: -1,
-    repairsPerMonth: -1,
-    historyRetentionDays: -1,
-    maxPhoneSessions: 1,
-  },
-  team: {
     messagesPerDay: -1,
     sessionsPerMonth: -1,
     maxProjects: -1,
@@ -165,7 +155,6 @@ export class AppConfigService {
     const updated = {
       free: { ...current.free, ...limits.free },
       pro: { ...current.pro, ...limits.pro },
-      team: { ...current.team, ...limits.team },
     };
     return this.setConfig(
       'subscription-limits',
