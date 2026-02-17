@@ -142,6 +142,10 @@ interface ClaudeMessagePayload {
   },
   namespace: '/',
   maxHttpBufferSize: 5e6, // 5MB - transcript history payloads can be large
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 120_000, // 2 minutes - allows brief disconnects to recover seamlessly
+    skipMiddlewares: true, // Skip auth re-verification on recovery (session already authenticated)
+  },
 })
 export class WebsocketGateway
   implements OnGatewayConnection, OnGatewayDisconnect
@@ -175,6 +179,10 @@ export class WebsocketGateway
   private sessionSockets = new Map<string, Socket>(); // sessionId -> Socket object (direct reference)
   private userCliConnections = new Map<string, Set<string>>(); // userId -> Set of sessionIds (track CLIs by user for cross-device routing)
 
+  // Grace period: delay marking devices OFFLINE to tolerate brief disconnects (e.g., network blips)
+  private static readonly DISCONNECT_GRACE_PERIOD_MS = 5_000;
+  private disconnectGraceTimers = new Map<string, NodeJS.Timeout>(); // deviceId -> timer
+
   constructor(
     private configService: ConfigService,
     private devicesService: DevicesService,
@@ -203,6 +211,38 @@ export class WebsocketGateway
 
   async handleConnection(client: AuthenticatedSocket) {
     this.logger.log(`handleConnection start: auth=${JSON.stringify(client.handshake.auth)}`);
+
+    // Connection State Recovery: if the client recovered, restore in-memory maps and skip heavy DB ops
+    if ((client as any).recovered) {
+      this.logger.log(`Client ${client.id} recovered via Connection State Recovery`);
+      const deviceId = client.handshake.auth?.deviceId as string | undefined;
+      const sessionId = client.handshake.auth?.sessionId as string | undefined;
+      const clientType = client.handshake.auth?.clientType as string | undefined;
+
+      // Restore in-memory tracking maps from handshake auth (rooms are auto-restored by socket.io)
+      if (clientType === 'session-scoped' && sessionId) {
+        this.sessionConnections.set(sessionId, client.id);
+        this.sessionSockets.set(sessionId, client);
+      }
+      if (deviceId) {
+        this.deviceConnections.set(deviceId, client.id);
+        // Cancel any pending grace-period disconnect timer
+        this.cancelGraceTimer(deviceId);
+      }
+      if (client.userId) {
+        if (!this.userConnections.has(client.userId)) {
+          this.userConnections.set(client.userId, new Set());
+        }
+        this.userConnections.get(client.userId)!.add(client.id);
+        if (sessionId && clientType === 'session-scoped') {
+          if (!this.userCliConnections.has(client.userId)) {
+            this.userCliConnections.set(client.userId, new Set());
+          }
+          this.userCliConnections.get(client.userId)!.add(sessionId);
+        }
+      }
+      return; // Skip full registration — device status + phone session already up to date
+    }
 
     try {
       // Extract token from handshake
@@ -294,6 +334,7 @@ export class WebsocketGateway
         // Also track by device if provided, and get userId from device if not set via token
         if (deviceId) {
           this.deviceConnections.set(deviceId, client.id);
+          this.cancelGraceTimer(deviceId); // Cancel pending offline transition from previous disconnect
 
           // Get device metadata from handshake headers
           const deviceName = client.handshake.headers['x-device-name'] as string || 'CLI Device';
@@ -415,6 +456,7 @@ export class WebsocketGateway
         client.deviceId = deviceId;
         client.isDevice = true;
         this.deviceConnections.set(deviceId, client.id);
+        this.cancelGraceTimer(deviceId); // Cancel pending offline transition from previous disconnect
 
         // Join device room
         client.join(`device:${deviceId}`);
@@ -539,49 +581,75 @@ export class WebsocketGateway
       }
     }
 
-    // Handle device disconnection
+    // Handle device disconnection — use grace period to tolerate brief network blips
     if (client.deviceId) {
-      this.deviceConnections.delete(client.deviceId);
+      const disconnectedDeviceId = client.deviceId;
+      const disconnectedCliVersion = client.cliVersion;
 
-      // Update device status to offline
-      try {
-        const device = await this.devicesService.updateStatus(
-          client.deviceId,
-          DeviceStatus.OFFLINE,
-        );
+      // Remove stale socket mapping (reconnect will re-add with new socket ID)
+      this.deviceConnections.delete(disconnectedDeviceId);
 
-        // Mark all Claude sessions as inactive when device goes offline
+      this.logger.log(
+        `Device ${disconnectedDeviceId} disconnected — starting ${WebsocketGateway.DISCONNECT_GRACE_PERIOD_MS}ms grace period`,
+      );
+
+      // Cancel any existing grace timer (handles rapid disconnect/reconnect cycles)
+      this.cancelGraceTimer(disconnectedDeviceId);
+
+      // Start grace period timer — only mark OFFLINE if device doesn't reconnect
+      const timer = setTimeout(async () => {
+        this.disconnectGraceTimers.delete(disconnectedDeviceId);
+
+        // Check if device has already reconnected during grace period
+        if (this.deviceConnections.has(disconnectedDeviceId)) {
+          this.logger.log(`Device ${disconnectedDeviceId} reconnected during grace period — skipping offline transition`);
+          return;
+        }
+
+        // Device didn't reconnect — proceed with offline transition
+        this.logger.log(`Grace period expired for device ${disconnectedDeviceId} — marking OFFLINE`);
+
         try {
-          const { count, sessionKeys } = await this.claudeSessionsService.markAllInactive(client.deviceId);
-          if (count > 0) {
-            this.logger.log(`Marked ${count} session(s) inactive for device ${client.deviceId}`);
-            // Notify mobile clients so they update in-memory state
-            if (device.userId && device.userId !== 'pending') {
-              for (const sessionKey of sessionKeys) {
-                this.sendToUser(device.userId, 'claude_session_update', {
-                  sessionKey,
-                  deviceId: client.deviceId,
-                  state: 'inactive',
-                  lastUsedAt: new Date().toISOString(),
-                });
+          const device = await this.devicesService.updateStatus(
+            disconnectedDeviceId,
+            DeviceStatus.OFFLINE,
+          );
+
+          // Mark all Claude sessions as inactive when device goes offline
+          try {
+            const { count, sessionKeys } = await this.claudeSessionsService.markAllInactive(disconnectedDeviceId);
+            if (count > 0) {
+              this.logger.log(`Marked ${count} session(s) inactive for device ${disconnectedDeviceId}`);
+              // Notify mobile clients so they update in-memory state
+              if (device.userId && device.userId !== 'pending') {
+                for (const sessionKey of sessionKeys) {
+                  this.sendToUser(device.userId, 'claude_session_update', {
+                    sessionKey,
+                    deviceId: disconnectedDeviceId,
+                    state: 'inactive',
+                    lastUsedAt: new Date().toISOString(),
+                  });
+                }
               }
             }
+          } catch (error) {
+            this.logger.error(`Error marking sessions inactive: ${error}`);
+          }
+
+          // Notify user that device is offline
+          if (device.userId && device.userId !== 'pending') {
+            this.server.to(`user:${device.userId}`).emit('device_status', {
+              deviceId: disconnectedDeviceId,
+              status: DeviceStatus.OFFLINE,
+              cliVersion: disconnectedCliVersion,
+            });
           }
         } catch (error) {
-          this.logger.error(`Error marking sessions inactive: ${error}`);
+          this.logger.error(`Error updating device status: ${error}`);
         }
+      }, WebsocketGateway.DISCONNECT_GRACE_PERIOD_MS);
 
-        // Notify user that device is offline
-        if (device.userId && device.userId !== 'pending') {
-          this.server.to(`user:${device.userId}`).emit('device_status', {
-            deviceId: client.deviceId,
-            status: DeviceStatus.OFFLINE,
-            cliVersion: client.cliVersion,
-          });
-        }
-      } catch (error) {
-        this.logger.error(`Error updating device status: ${error}`);
-      }
+      this.disconnectGraceTimers.set(disconnectedDeviceId, timer);
 
       this.logger.log(
         `Device ${client.deviceId} disconnected (socket: ${client.id})`,
@@ -748,6 +816,16 @@ export class WebsocketGateway
     }
 
     return { success: true };
+  }
+
+  // Cancel a pending disconnect grace timer for a device (called on reconnect/recovery)
+  private cancelGraceTimer(deviceId: string): void {
+    const existing = this.disconnectGraceTimers.get(deviceId);
+    if (existing) {
+      clearTimeout(existing);
+      this.disconnectGraceTimers.delete(deviceId);
+      this.logger.log(`Cancelled disconnect grace timer for device ${deviceId}`);
+    }
   }
 
   // Helper method to send to specific user

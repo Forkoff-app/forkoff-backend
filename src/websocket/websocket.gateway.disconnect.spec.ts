@@ -195,7 +195,16 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
     },
   };
 
+  // Flush microtasks so the async grace timer callback completes
+  async function advancePastGracePeriod() {
+    jest.advanceTimersByTime(5000);
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+    }
+  }
+
   beforeEach(async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick'] });
     emittedEvents.length = 0;
 
     const module: TestingModule = await Test.createTestingModule({
@@ -218,10 +227,11 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
   });
 
   afterEach(() => {
+    jest.useRealTimers();
     jest.clearAllMocks();
   });
 
-  it('should call markAllInactive when a device disconnects', async () => {
+  it('should call markAllInactive when a device disconnects (after grace period)', async () => {
     const cliClient = {
       id: 'socket-cli-1',
       userId: 'user-1',
@@ -231,6 +241,7 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
     } as any;
 
     await gateway.handleDisconnect(cliClient);
+    await advancePastGracePeriod();
 
     expect(mockClaudeSessionsService.markAllInactive).toHaveBeenCalledWith('device-123');
   });
@@ -244,11 +255,12 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
     } as any;
 
     await gateway.handleDisconnect(mobileClient);
+    await advancePastGracePeriod();
 
     expect(mockClaudeSessionsService.markAllInactive).not.toHaveBeenCalled();
   });
 
-  it('should emit claude_session_update for each inactivated session', async () => {
+  it('should emit claude_session_update for each inactivated session (after grace period)', async () => {
     const cliClient = {
       id: 'socket-cli-1',
       userId: 'user-1',
@@ -258,6 +270,7 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
     } as any;
 
     await gateway.handleDisconnect(cliClient);
+    await advancePastGracePeriod();
 
     const sessionUpdates = emittedEvents.filter(e => e.event === 'claude_session_update');
     expect(sessionUpdates.length).toBe(3);
@@ -266,7 +279,7 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
     expect(sessionUpdates.map(e => e.data.sessionKey).sort()).toEqual(['session-1', 'session-2', 'session-3']);
   });
 
-  it('should still update device status even if markAllInactive fails', async () => {
+  it('should still update device status even if markAllInactive fails (after grace period)', async () => {
     mockClaudeSessionsService.markAllInactive.mockRejectedValueOnce(new Error('DB error'));
 
     const cliClient = {
@@ -278,8 +291,9 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
     } as any;
 
     await gateway.handleDisconnect(cliClient);
+    await advancePastGracePeriod();
 
-    // Device status should still have been updated
+    // Device status should still have been updated (after grace period)
     expect(mockDevicesService.updateStatus).toHaveBeenCalledWith('device-123', 'OFFLINE');
     // And the user should still be notified
     const statusEvents = emittedEvents.filter(e => e.event === 'device_status');
