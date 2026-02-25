@@ -38,7 +38,7 @@ async function bootstrap() {
       : true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'stripe-signature'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
   // Global validation pipe
@@ -80,10 +80,7 @@ async function bootstrap() {
       .addTag('health', 'Health check endpoint')
       .addTag('auth', 'Authentication & user profile')
       .addTag('devices', 'Device management & pairing')
-      .addTag('projects', 'Project management')
-      .addTag('chat', 'Chat sessions & messages')
       .addTag('terminal', 'Remote terminal sessions')
-      .addTag('github', 'GitHub integration')
       .build();
 
     const document = SwaggerModule.createDocument(app, config);

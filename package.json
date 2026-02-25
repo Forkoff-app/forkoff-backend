@@ -23,9 +23,21 @@
     "api",
     "forkoff"
   ],
-  "author": "",
+  "author": {
+    "name": "ForkOff",
+    "email": "support@forkoff.app",
+    "url": "https://forkoff.app"
+  },
   "license": "MIT",
-  "description": "ForkOff Backend API with WebSocket support",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Forkoff-app/forkoff-backend.git"
+  },
+  "homepage": "https://forkoff.app",
+  "bugs": {
+    "url": "https://github.com/Forkoff-app/forkoff-backend/issues"
+  },
+  "description": "Real-time API server powering the ForkOff ecosystem",
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.984.0",
     "@nestjs/common": "^11.1.12",
@@ -48,10 +60,8 @@
     "passport-custom": "^1.1.1",
     "passport-jwt": "^4.0.1",
     "reflect-metadata": "^0.2.2",
-    "resend": "^6.9.2",
     "rxjs": "^7.8.2",
     "socket.io": "^4.8.3",
-    "stripe": "^20.3.1",
     "swagger-ui-express": "^5.0.1",
     "winston": "^3.19.0"
   },

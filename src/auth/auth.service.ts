@@ -206,7 +206,7 @@ export class AuthService {
     });
 
     // Delete the user - cascade deletes will handle related records
-    // (devices, projects, chat sessions, etc. all have onDelete: Cascade)
+    // (devices, fingerprints, etc. all have onDelete: Cascade)
     await this.prisma.user.delete({
       where: { id: userId },
     });

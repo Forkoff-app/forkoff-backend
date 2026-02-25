@@ -251,17 +251,22 @@ npm run db:migrate
 
 ```
 src/
-├── auth/           # Authentication module
-├── devices/        # Device management
+├── auth/           # Authentication & user profile
+├── devices/        # Device management & pairing
 ├── claude-sessions/# Claude session handling
-├── chat/           # Chat sessions
 ├── terminal/       # Terminal sessions
 ├── prompt-queue/   # Queue management
 ├── analytics/      # Usage analytics
 ├── achievements/   # Gamification
 ├── notifications/  # Push notifications
-├── websocket/      # WebSocket gateway
-└── prisma/         # Database client
+├── websocket/      # WebSocket gateway (real-time relay)
+├── app-config/     # App version checks & feature flags
+├── config/         # Secrets management (AWS Secrets Manager)
+├── crypto/         # E2EE key exchange support
+├── geo-ip/         # GeoIP country detection
+├── health/         # Health check endpoint
+├── logging/        # Winston logging & exception filters
+└── prisma/         # Database client & schema
 ```
 
 ---

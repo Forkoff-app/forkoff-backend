@@ -16,15 +16,6 @@ interface SecretPayload {
   PAIRING_CODE_EXPIRY_MINUTES?: string;
   ADMIN_EMAILS?: string;
   ALLOWED_ORIGINS?: string;
-  STRIPE_SECRET_KEY?: string;
-  STRIPE_WEBHOOK_SECRET?: string;
-  STRIPE_PRO_PRICE_ID?: string;
-  SMTP_HOST?: string;
-  SMTP_PORT?: string;
-  SMTP_USER?: string;
-  SMTP_PASS?: string;
-  SMTP_FROM?: string;
-  RESEND_API_KEY?: string;
 }
 
 const SECRET_NAME = process.env.SECRETS_MANAGER_NAME || 'forkoff-api';
