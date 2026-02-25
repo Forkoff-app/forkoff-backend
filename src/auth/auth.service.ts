@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { GeoIpService } from '../geo-ip/geo-ip.service';
 import { User } from '@prisma/client';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { truncateId } from '../logging/sanitize';
 
 @Injectable()
 export class AuthService {
@@ -114,9 +115,9 @@ export class AuthService {
         },
       });
 
-      this.logger.log(`Updated country for user ${userId}: ${country}`);
+      this.logger.log(`Updated country for user ${truncateId(userId)}`);
     } catch (error) {
-      this.logger.error(`Failed to update country for user ${userId}:`, error);
+      this.logger.error(`Failed to update country for user ${truncateId(userId)}:`, error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -172,7 +173,7 @@ export class AuthService {
         where: { id: existing.id },
         data: { registeredAt: new Date() },
       });
-      this.logger.log(`Device fingerprint refreshed for user ${userId}`);
+      this.logger.log(`Device fingerprint refreshed for user ${truncateId(userId)}`);
       return;
     }
 
@@ -182,7 +183,7 @@ export class AuthService {
         fingerprintHash,
       },
     });
-    this.logger.log(`Device fingerprint registered for user ${userId}`);
+    this.logger.log(`Device fingerprint registered for user ${truncateId(userId)}`);
   }
 
   /**
@@ -197,7 +198,7 @@ export class AuthService {
   }
 
   async deleteAccount(userId: string): Promise<void> {
-    this.logger.log(`Deleting account for user: ${userId}`);
+    this.logger.log(`Deleting account for user: ${truncateId(userId)}`);
 
     // Delete push tokens first (not cascade-deleted)
     await this.prisma.pushToken.deleteMany({
@@ -210,7 +211,7 @@ export class AuthService {
       where: { id: userId },
     });
 
-    this.logger.log(`Database records deleted for user: ${userId}`);
+    this.logger.log(`Database records deleted for user: ${truncateId(userId)}`);
 
     // Delete user from Supabase Auth
     if (this.supabaseAdmin) {
@@ -220,7 +221,7 @@ export class AuthService {
         // Don't throw - database records are already deleted
         // The Supabase auth record will be orphaned but user can't login
       } else {
-        this.logger.log(`User deleted from Supabase Auth: ${userId}`);
+        this.logger.log(`User deleted from Supabase Auth: ${truncateId(userId)}`);
       }
     }
   }

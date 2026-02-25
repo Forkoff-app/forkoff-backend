@@ -31,7 +31,7 @@ export class DeviceRegistrationController {
       throw new BadRequestException('fingerprintHash is required');
     }
 
-    this.logger.log(`Device check for hash: ${body.fingerprintHash.substring(0, 8)}... email: ${body.email ? body.email.substring(0, 3) + '***' : 'none'}`);
+    this.logger.debug(`Device check: hash=${body.fingerprintHash.substring(0, 8)}...`);
     return this.authService.checkDeviceRegistration(body.fingerprintHash, body.email);
   }
 

@@ -1,4 +1,4 @@
-import { Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, UseGuards } from '@nestjs/common';
 import {
   ApiTags,
   ApiBearerAuth,
@@ -9,7 +9,12 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { User } from '@prisma/client';
 import { SubscriptionService } from './subscription.service';
-import { UsageResponseDto, LimitCheckResponseDto } from './dto';
+import {
+  UsageResponseDto,
+  LimitCheckResponseDto,
+  VerifyReceiptDto,
+  VerifyReceiptResponseDto,
+} from './dto';
 
 @ApiTags('subscription')
 @ApiBearerAuth('supabase-auth')
@@ -44,5 +49,27 @@ export class SubscriptionController {
   @ApiResponse({ status: 200, type: LimitCheckResponseDto })
   async recordRepair(@CurrentUser() user: User): Promise<LimitCheckResponseDto> {
     return this.subscriptionService.recordDeviceRepair(user.id);
+  }
+
+  @Post('verify-receipt')
+  @ApiOperation({ summary: 'Verify Apple/Google IAP receipt and activate subscription' })
+  @ApiResponse({ status: 200, type: VerifyReceiptResponseDto })
+  async verifyReceipt(
+    @CurrentUser() user: User,
+    @Body() dto: VerifyReceiptDto,
+  ): Promise<VerifyReceiptResponseDto> {
+    if (dto.platform === 'ios') {
+      return this.subscriptionService.verifyAppleReceipt(
+        user.id,
+        dto.receipt,
+        dto.productId,
+      );
+    }
+
+    // Android not yet implemented
+    return {
+      success: false,
+      error: 'Android receipt verification not yet supported',
+    };
   }
 }

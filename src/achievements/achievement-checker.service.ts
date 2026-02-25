@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AchievementsService, UnlockedAchievement } from './achievements.service';
 import { AnalyticsService } from '../analytics/analytics.service';
+import { truncateId } from '../logging/sanitize';
 
 /**
  * Service for checking and triggering achievement unlocks
@@ -55,11 +56,11 @@ export class AchievementCheckerService {
 
       if (allUnlocked.length > 0) {
         this.logger.log(
-          `User ${userId} unlocked ${allUnlocked.length} achievements: ${allUnlocked.map((a) => a.achievement.key).join(', ')}`,
+          `User ${truncateId(userId)} unlocked ${allUnlocked.length} achievements: ${allUnlocked.map((a) => a.achievement.key).join(', ')}`,
         );
       }
     } catch (error) {
-      this.logger.error(`Error checking achievements for user ${userId}: ${error}`);
+      this.logger.error(`Error checking achievements for user ${truncateId(userId)}: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     return allUnlocked;
@@ -74,7 +75,7 @@ export class AchievementCheckerService {
       const totalTokens = await this.analyticsService.getTotalTokens(userId);
       return this.achievementsService.checkTokenMilestones(userId, totalTokens);
     } catch (error) {
-      this.logger.error(`Error checking token achievements: ${error}`);
+      this.logger.error(`Error checking token achievements: ${error instanceof Error ? error.message : String(error)}`);
       return [];
     }
   }

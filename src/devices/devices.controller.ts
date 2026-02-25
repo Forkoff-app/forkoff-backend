@@ -21,6 +21,7 @@ import {
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { DevicesService } from './devices.service';
+import { truncateId } from '../logging/sanitize';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { User, DeviceStatus } from '@prisma/client';
@@ -97,9 +98,9 @@ export class DevicesController {
   ) {
     this.logger.log(`[PAIR] Pairing request received`);
     this.logger.log(`[PAIR] Auth header present: ${!!authHeader}`);
-    this.logger.log(`[PAIR] Auth header (first 50 chars): ${authHeader?.substring(0, 50)}...`);
-    this.logger.log(`[PAIR] User from JWT: ${user?.id}, email: ${user?.email}`);
-    this.logger.log(`[PAIR] Pairing code: ${data.pairingCode}`);
+    this.logger.log(`[PAIR] Auth header: ${authHeader ? '[present]' : '[missing]'}`);
+    this.logger.log(`[PAIR] User from JWT: ${truncateId(user?.id)}`);
+    this.logger.log(`[PAIR] Pairing code: [redacted]`);
     return this.devicesService.pairDevice(user.id, data.pairingCode);
   }
 

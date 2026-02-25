@@ -27,7 +27,7 @@ interface SecretPayload {
   RESEND_API_KEY?: string;
 }
 
-const SECRET_NAME = 'forkoff-api';
+const SECRET_NAME = process.env.SECRETS_MANAGER_NAME || 'forkoff-api';
 const REGION = 'us-east-1';
 const logger = new Logger('Secrets');
 
@@ -36,8 +36,8 @@ const logger = new Logger('Secrets');
  * Called before any other initialization in the application.
  */
 export async function loadSecrets(): Promise<void> {
-  // Skip in development or if DATABASE_URL is already set (local dev)
-  if (process.env.NODE_ENV === 'development' || process.env.DATABASE_URL) {
+  // Skip if DATABASE_URL is already set (true local dev)
+  if (process.env.DATABASE_URL) {
     logger.log('Using local environment variables');
     return;
   }
@@ -79,7 +79,7 @@ export async function loadSecrets(): Promise<void> {
 
     logger.log('Secrets loaded successfully from AWS Secrets Manager');
   } catch (error) {
-    logger.error('Failed to load secrets from AWS Secrets Manager:', error);
+    logger.error('Failed to load secrets from AWS Secrets Manager:', error instanceof Error ? error.message : String(error));
     throw error;
   }
 }

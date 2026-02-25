@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Request } from 'express';
+import { truncateId } from '../../logging/sanitize';
 
 export interface JwtPayload {
   sub: string; // User ID from Supabase
@@ -52,7 +53,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     }
 
     const token = authHeader.substring(7);
-    this.logger.log(`[JWT] Verifying token (first 50 chars): ${token.substring(0, 50)}...`);
+    this.logger.log(`[JWT] Verifying token: [JWT present]`);
 
     try {
       // Use Supabase to verify the token
@@ -63,7 +64,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         throw new UnauthorizedException('Invalid token');
       }
 
-      this.logger.log(`[JWT] Token verified for Supabase user: ${supabaseUser.id}, email: ${supabaseUser.email}`);
+      this.logger.log(`[JWT] Token verified for Supabase user: ${truncateId(supabaseUser.id)}`);
 
       // Find or create user in our database
       let user = await this.prisma.user.findUnique({
@@ -71,7 +72,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       });
 
       if (!user) {
-        this.logger.log(`[JWT] Creating new user in DB: ${supabaseUser.id}`);
+        this.logger.log(`[JWT] Creating new user in DB: ${truncateId(supabaseUser.id)}`);
         user = await this.prisma.user.create({
           data: {
             id: supabaseUser.id,
@@ -80,13 +81,13 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         });
       }
 
-      this.logger.log(`[JWT] User validated successfully: ${user.id}`);
+      this.logger.log(`[JWT] User validated successfully: ${truncateId(user.id)}`);
       return user;
     } catch (error) {
       if (error instanceof UnauthorizedException) {
         throw error;
       }
-      this.logger.error(`[JWT] Unexpected error during validation: ${error}`);
+      this.logger.error(`[JWT] Unexpected error during validation: ${error instanceof Error ? error.message : String(error)}`);
       throw new UnauthorizedException('Token validation failed');
     }
   }

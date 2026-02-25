@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConfigService } from '@nestjs/config';
+import { truncateId, maskCode } from '../logging/sanitize';
 import {
   ReferralCodeResponseDto,
   ReferralStatsDto,
@@ -69,7 +70,7 @@ export class ReferralsService {
           referralCode: this.generateReferralCode(),
         },
       });
-      this.logger.log(`Created referral profile for user ${userId}`);
+      this.logger.log(`Created referral profile for user ${truncateId(userId)}`);
     }
 
     const stats = this.calculateStats(profile);
@@ -178,7 +179,7 @@ export class ReferralsService {
     });
 
     this.logger.log(
-      `User ${userId} applied referral code ${normalizedCode} from user ${referrerProfile.userId}`,
+      `User ${truncateId(userId)} applied referral code ${maskCode(normalizedCode)} from user ${truncateId(referrerProfile.userId)}`,
     );
 
     return {
@@ -242,13 +243,13 @@ export class ReferralsService {
         });
 
         this.logger.log(
-          `User ${referral.referrerProfile.userId} earned reward month #${newMonthsEarned} from referrals (${updatedProfile.successfulReferrals} total conversions)`,
+          `User ${truncateId(referral.referrerProfile.userId)} earned reward month #${newMonthsEarned} from referrals (${updatedProfile.successfulReferrals} total conversions)`,
         );
       }
     });
 
     this.logger.log(
-      `Referral converted: user ${userId} referred by ${referral.referrerProfile.userId}`,
+      `Referral converted: user ${truncateId(userId)} referred by ${truncateId(referral.referrerProfile.userId)}`,
     );
   }
 
@@ -318,7 +319,7 @@ export class ReferralsService {
     });
 
     this.logger.log(
-      `User ${userId} claimed ${availableMonths} referral reward month(s)`,
+      `User ${truncateId(userId)} claimed ${availableMonths} referral reward month(s)`,
     );
 
     return {

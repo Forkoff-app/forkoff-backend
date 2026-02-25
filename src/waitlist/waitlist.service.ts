@@ -38,7 +38,7 @@ export class WaitlistService {
       });
     }
 
-    this.logger.log(`Added ${email} to waitlist (confirmation sent: ${sent})`);
+    this.logger.log(`Added [email] to waitlist (confirmation sent: ${sent})`);
 
     return {
       success: true,
@@ -78,7 +78,7 @@ export class WaitlistService {
         },
       });
 
-      this.logger.log(`Granted beta access to ${email}`);
+      this.logger.log(`Granted beta access to [email]`);
     }
 
     return {
@@ -158,7 +158,7 @@ export class WaitlistService {
           failed++;
         }
       } catch (error) {
-        this.logger.error(`Failed to resend to ${entry.email}:`, error);
+        this.logger.error(`Failed to resend to [email]:`, error instanceof Error ? error.message : String(error));
         failed++;
       }
     }
@@ -206,7 +206,7 @@ export class WaitlistService {
           successCount++;
         }
       } catch (error) {
-        this.logger.error(`Failed to send confirmation to ${entry.email}:`, error);
+        this.logger.error(`Failed to send confirmation to [email]:`, error instanceof Error ? error.message : String(error));
       }
     }
 

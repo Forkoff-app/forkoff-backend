@@ -124,7 +124,7 @@ export class ClaudeSessionsService implements OnModuleDestroy {
       await this.flushSessionBuffer();
       await this.flushMessageBuffer();
     } catch (error) {
-      this.logger.error(`Flush error: ${error}`);
+      this.logger.error(`Flush error: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       this.isFlushing = false;
     }
@@ -179,7 +179,7 @@ export class ClaudeSessionsService implements OnModuleDestroy {
         this.sessionIdCache.clear();
       }
     } catch (error) {
-      this.logger.error(`Session flush transaction failed: ${error}`);
+      this.logger.error(`Session flush transaction failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -252,7 +252,7 @@ export class ClaudeSessionsService implements OnModuleDestroy {
         // Auto-set session name from the first user message
         await this.autoSetSessionNames(entries);
       } catch (error) {
-        this.logger.error(`Message flush transaction failed: ${error}`);
+        this.logger.error(`Message flush transaction failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   }

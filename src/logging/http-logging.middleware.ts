@@ -39,7 +39,7 @@ export class HttpLoggingMiddleware implements NestMiddleware {
         url: originalUrl,
         statusCode,
         durationMs,
-        ip,
+        ip: '[redacted]',
         userAgent,
       };
 

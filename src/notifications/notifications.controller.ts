@@ -5,7 +5,9 @@ import {
   Body,
   UseGuards,
   Request,
+  UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { NotificationsService } from './notifications.service';
 import { SupabaseAuthGuard } from '../auth/supabase-auth.guard';
 
@@ -23,7 +25,10 @@ interface AuthenticatedRequest extends Request {
 
 @Controller('notifications')
 export class NotificationsController {
-  constructor(private notificationsService: NotificationsService) {}
+  constructor(
+    private notificationsService: NotificationsService,
+    private configService: ConfigService,
+  ) {}
 
   /**
    * Register a push notification token
@@ -41,6 +46,29 @@ export class NotificationsController {
       body.platform,
     );
     return { success: true };
+  }
+
+  /**
+   * Broadcast a push notification to all registered users
+   * POST /notifications/broadcast
+   */
+  @Post('broadcast')
+  async broadcast(
+    @Request() req: any,
+    @Body() body: { title: string; body: string; data?: Record<string, unknown> },
+  ) {
+    const adminKey = req.headers['x-admin-key'];
+    const expectedKey = this.configService.get<string>('ADMIN_API_KEY');
+    if (!expectedKey || adminKey !== expectedKey) {
+      throw new UnauthorizedException('Invalid admin key');
+    }
+
+    const result = await this.notificationsService.broadcastToAll(
+      body.title,
+      body.body,
+      body.data,
+    );
+    return { success: true, ...result };
   }
 
   /**

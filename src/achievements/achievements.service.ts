@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Achievement, UserAchievement } from '@prisma/client';
+import { truncateId } from '../logging/sanitize';
 
 export interface AchievementWithProgress extends Achievement {
   userProgress?: {
@@ -354,7 +355,7 @@ export class AchievementsService {
       },
     });
 
-    this.logger.log(`Achievement unlocked: ${achievementId} for user ${userId}`);
+    this.logger.log(`Achievement unlocked: ${achievementId} for user ${truncateId(userId)}`);
     return userAchievement;
   }
 

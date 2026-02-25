@@ -21,15 +21,42 @@ import { PromptQueueService } from '../prompt-queue/prompt-queue.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { DeviceStatus, MessageRole, ApprovalType } from '@prisma/client';
+import { truncateId } from '../logging/sanitize';
+import { createHash, randomBytes, randomUUID } from 'crypto';
+
+/** Hash a raw device ID to a 32-hex-char (128-bit) opaque identifier for storage */
+function hashDeviceId(rawId: string): string {
+  return createHash('sha256').update(rawId).digest('hex').slice(0, 32);
+}
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
   deviceId?: string;
   isDevice?: boolean; // true if connection is from CLI tool, false if from mobile app
-  clientType?: 'user-scoped' | 'session-scoped'; // Connection scoping type
+  clientType?: 'user-scoped' | 'session-scoped' | 'cli'; // Connection scoping type
   sessionId?: string; // Session ID for session-scoped connections
   cliVersion?: string; // CLI version from handshake auth
 }
+
+// Cloud relay pairing: in-memory store for pairing codes registered by CLI clients
+interface PairingCodeEntry {
+  cliSocketId: string;
+  cliDeviceId: string;
+  cliDeviceName: string;
+  platform: string;
+  createdAt: number;
+}
+
+// Cloud relay: paired device tokens for reconnect authentication
+interface PairedDeviceEntry {
+  mobileDeviceId: string;
+  cliRelayToken: string;
+  mobileRelayToken: string;
+  pairId: string;
+}
+
+/** TTL for pairing codes (10 minutes) */
+const PAIRING_CODE_TTL_MS = 10 * 60 * 1000;
 
 // Chat message payload from AI tool
 interface ChatMessagePayload {
@@ -150,7 +177,7 @@ interface ClaudeMessagePayload {
 export class WebsocketGateway
   implements OnGatewayConnection, OnGatewayDisconnect
 {
-  afterInit() {
+  async afterInit() {
     // When a session gets auto-named from its first user message,
     // broadcast the name to mobile clients so the UI updates in real-time.
     this.claudeSessionsService.onSessionNamed((deviceId, sessionKey, name) => {
@@ -161,10 +188,42 @@ export class WebsocketGateway
         lastUsedAt: new Date().toISOString(),
       });
     });
+
+    // Clean up expired pairing codes every 60 seconds
+    this.pairingCodeCleanupInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [code, entry] of this.pairingCodes) {
+        if (now - entry.createdAt > PAIRING_CODE_TTL_MS) {
+          this.pairingCodes.delete(code);
+        }
+      }
+    }, 60_000);
+
+    // Load persisted cloud pairings from DB into in-memory maps
+    try {
+      const pairings = await this.prisma.cloudPairing.findMany();
+      for (const p of pairings) {
+        this.pairedDevices.set(p.cliDeviceHash, {
+          mobileDeviceId: p.mobileDeviceHash,
+          cliRelayToken: p.cliRelayToken,
+          mobileRelayToken: p.mobileRelayToken,
+          pairId: p.pairId,
+        });
+        this.mobileToCli.set(p.mobileDeviceHash, p.cliDeviceHash);
+      }
+      this.logger.log(`Loaded ${pairings.length} cloud pairing(s) from DB`);
+    } catch (error) {
+      this.logger.error(`Failed to load cloud pairings from DB: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   @WebSocketServer()
   server: Server;
+
+  /** Safe accessor — NestJS may inject Namespace (server.sockets IS the Map) or Server (server.sockets.sockets is the Map) */
+  private get connectedSockets(): Map<string, AuthenticatedSocket> {
+    return (this.server.sockets?.sockets ?? this.server.sockets) as Map<string, AuthenticatedSocket>;
+  }
 
   private readonly logger = new Logger(WebsocketGateway.name);
   private supabase: SupabaseClient;
@@ -179,9 +238,25 @@ export class WebsocketGateway
   private sessionSockets = new Map<string, Socket>(); // sessionId -> Socket object (direct reference)
   private userCliConnections = new Map<string, Set<string>>(); // userId -> Set of sessionIds (track CLIs by user for cross-device routing)
 
+  // Device ownership cache: deviceId -> userId (for authorization checks)
+  private deviceOwnershipCache = new Map<string, string>();
+
   // Grace period: delay marking devices OFFLINE to tolerate brief disconnects (e.g., network blips)
   private static readonly DISCONNECT_GRACE_PERIOD_MS = 5_000;
   private disconnectGraceTimers = new Map<string, NodeJS.Timeout>(); // deviceId -> timer
+
+  // Cloud relay: in-memory pairing code store (code -> CLI info, TTL: 10min)
+  private pairingCodes = new Map<string, PairingCodeEntry>();
+  // Cloud relay: paired device tokens (cliDeviceId -> pairing tokens)
+  private pairedDevices = new Map<string, PairedDeviceEntry>();
+  // Cloud relay: CLI client connections (cliDeviceId -> socketId)
+  private cliClientConnections = new Map<string, string>();
+  // Cloud relay: CLI sockets (cliDeviceId -> Socket)
+  private cliClientSockets = new Map<string, AuthenticatedSocket>();
+  // Cloud relay: mobile-to-CLI device mapping (mobileDeviceId -> cliDeviceId)
+  private mobileToCli = new Map<string, string>();
+  // Cleanup interval for expired pairing codes
+  private pairingCodeCleanupInterval: NodeJS.Timeout | null = null;
 
   constructor(
     private configService: ConfigService,
@@ -209,8 +284,49 @@ export class WebsocketGateway
     });
   }
 
+  /**
+   * Verify that a user owns a device. Uses an in-memory cache to avoid
+   * repeated DB lookups, falling back to Prisma when the cache misses.
+   * Also accepts cloud-paired devices (not in legacy devices table).
+   */
+  private async verifyDeviceOwnership(
+    userId: string,
+    deviceId: string,
+    client?: AuthenticatedSocket,
+  ): Promise<boolean> {
+    const cached = this.deviceOwnershipCache.get(deviceId);
+    if (cached !== undefined) return cached === userId;
+
+    // Check legacy devices table
+    const device = await this.prisma.device.findUnique({
+      where: { id: deviceId },
+      select: { userId: true },
+    });
+    if (device?.userId) {
+      this.deviceOwnershipCache.set(deviceId, device.userId);
+      return device.userId === userId;
+    }
+
+    // Cloud relay: verify the requesting mobile is actually paired to this CLI device.
+    // mobileToCli maps hashed(mobileDeviceId) -> hashed(cliDeviceId).
+    if (this.cliClientConnections.has(deviceId) && client) {
+      const mobileDeviceId = client.handshake?.auth?.mobileDeviceId as string | undefined;
+      if (mobileDeviceId) {
+        const mobileHash = hashDeviceId(mobileDeviceId);
+        const cliHash = hashDeviceId(deviceId);
+        const pairedCliHash = this.mobileToCli.get(mobileHash);
+        if (pairedCliHash === cliHash) {
+          this.deviceOwnershipCache.set(deviceId, userId);
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   async handleConnection(client: AuthenticatedSocket) {
-    this.logger.log(`handleConnection start: auth=${JSON.stringify(client.handshake.auth)}`);
+    this.logger.log(`handleConnection start`);
 
     // Connection State Recovery: if the client recovered, restore in-memory maps and skip heavy DB ops
     if ((client as any).recovered) {
@@ -268,13 +384,114 @@ export class WebsocketGateway
           // Join user's room for targeted broadcasts
           client.join(`user:${supabaseUser.id}`);
 
-          this.logger.log(`User ${supabaseUser.id} connected (socket: ${client.id})`);
+          this.logger.log(`User ${truncateId(supabaseUser.id)} connected (socket: ${client.id})`);
         }
+      }
+
+      // Handle CLI cloud relay client connections (clientType: 'cli')
+      const rawClientType = client.handshake.auth?.clientType as string | undefined;
+      if (rawClientType === 'cli') {
+        const cliDeviceId = client.handshake.auth?.deviceId as string;
+        const relayToken = client.handshake.auth?.relayToken as string | undefined;
+
+        if (!cliDeviceId) {
+          this.logger.warn(`[WS] CLI client connected without deviceId — disconnecting`);
+          client.disconnect(true);
+          return;
+        }
+
+        client.clientType = 'cli';
+        client.deviceId = cliDeviceId;
+        client.isDevice = true;
+
+        // If relay token provided, verify against stored pair (keyed by hashed ID)
+        if (relayToken) {
+          const cliHash = hashDeviceId(cliDeviceId);
+          const pair = this.pairedDevices.get(cliHash);
+          if (pair && pair.cliRelayToken === relayToken) {
+            this.logger.log(`CLI ${truncateId(cliDeviceId)} authenticated via relay token`);
+          } else {
+            this.logger.warn(`CLI ${truncateId(cliDeviceId)} relay token mismatch — allowing connection (may need to re-pair)`);
+          }
+        }
+
+        // Track CLI client connection
+        this.cliClientConnections.set(cliDeviceId, client.id);
+        this.cliClientSockets.set(cliDeviceId, client);
+        this.deviceConnections.set(cliDeviceId, client.id);
+        this.cancelGraceTimer(cliDeviceId);
+
+        // Join device room so events addressed to this device reach the CLI
+        client.join(`device:${cliDeviceId}`);
+
+        // Try to update device status in DB (may not exist yet for first-time cloud pairing)
+        try {
+          const device = await this.devicesService.updateStatus(cliDeviceId, DeviceStatus.ONLINE);
+          if (device.userId && device.userId !== 'pending') {
+            this.deviceOwnershipCache.set(cliDeviceId, device.userId);
+            client.userId = device.userId;
+            if (!this.userConnections.has(device.userId)) {
+              this.userConnections.set(device.userId, new Set());
+            }
+            this.userConnections.get(device.userId)!.add(client.id);
+            client.join(`user:${device.userId}`);
+            this.server.to(`user:${device.userId}`).emit('device_status', {
+              deviceId: cliDeviceId,
+              status: DeviceStatus.ONLINE,
+            });
+          }
+        } catch {
+          // Device may not exist yet (first-time cloud pairing) — that's OK
+          this.logger.log(`CLI ${cliDeviceId} connected (device not yet in DB — awaiting pairing)`);
+        }
+
+        // Fallback: use userId from CLI auth handshake if DB lookup didn't set it
+        if (!client.userId) {
+          const cliAuthUserId = client.handshake.auth?.userId as string | undefined;
+          if (cliAuthUserId) {
+            client.userId = cliAuthUserId;
+            this.deviceOwnershipCache.set(cliDeviceId, cliAuthUserId);
+            if (!this.userConnections.has(cliAuthUserId)) {
+              this.userConnections.set(cliAuthUserId, new Set());
+            }
+            this.userConnections.get(cliAuthUserId)!.add(client.id);
+            client.join(`user:${cliAuthUserId}`);
+            this.logger.log(`CLI ${truncateId(cliDeviceId)} userId set from auth handshake: ${truncateId(cliAuthUserId)}`);
+          }
+        }
+
+        // Check if paired mobile is online and notify both sides (keyed by hashed ID)
+        const cliHashForPair = hashDeviceId(cliDeviceId);
+        const pairEntry = this.pairedDevices.get(cliHashForPair);
+        if (pairEntry) {
+          // pairEntry.mobileDeviceId is the hashed mobile ID — scan sockets by raw auth
+          const mobileSocketId = this.findMobileSocketForDeviceHash(pairEntry.mobileDeviceId);
+          if (mobileSocketId) {
+            client.emit('mobile_connected', { deviceId: pairEntry.mobileDeviceId });
+
+            // Retroactive relay auth: if mobile connected before CLI had a userId, set it now
+            if (client.userId) {
+              const mobileSocket = this.connectedSockets.get(mobileSocketId);
+              if (mobileSocket && !mobileSocket.userId) {
+                mobileSocket.userId = client.userId;
+                if (!this.userConnections.has(client.userId)) {
+                  this.userConnections.set(client.userId, new Set());
+                }
+                this.userConnections.get(client.userId)!.add(mobileSocketId);
+                mobileSocket.join(`user:${client.userId}`);
+                this.logger.log(`Retroactively set userId for mobile socket ${mobileSocketId} from CLI ${truncateId(cliDeviceId)}`);
+              }
+            }
+          }
+        }
+
+        this.logger.log(`CLI client connected: device=${cliDeviceId} (socket: ${client.id})`);
+        return;
       }
 
       // Handle phone session tracking for user-scoped (mobile) connections
       // Enforced for ALL users — only one mobile device per account
-      const clientType = client.handshake.auth?.clientType as 'user-scoped' | 'session-scoped' | undefined;
+      const clientType = rawClientType as 'user-scoped' | 'session-scoped' | undefined;
       if (clientType === 'user-scoped' && client.userId) {
         try {
           const deviceName = (client.handshake.auth?.deviceName as string) || 'Unknown device';
@@ -286,7 +503,7 @@ export class WebsocketGateway
 
           if (existingSession && existingSession.socketId !== client.id) {
             // Auto-kick the old device: emit session_claimed to the OLD socket
-            const oldSocket = this.server.sockets.sockets.get(existingSession.socketId);
+            const oldSocket = this.connectedSockets.get(existingSession.socketId);
             if (oldSocket) {
               oldSocket.emit('session_claimed', {
                 message: `Your session was claimed by ${deviceName}`,
@@ -298,7 +515,7 @@ export class WebsocketGateway
             }
 
             this.logger.log(
-              `Phone session auto-claimed for user ${client.userId}: kicked socket ${existingSession.socketId}, new socket ${client.id}`,
+              `Phone session auto-claimed for user ${truncateId(client.userId)}: kicked socket ${existingSession.socketId}, new socket ${client.id}`,
             );
           }
 
@@ -308,9 +525,57 @@ export class WebsocketGateway
             update: { socketId: client.id, deviceInfo: deviceName, lastActiveAt: new Date() },
             create: { userId: client.userId, socketId: client.id, deviceInfo: deviceName },
           });
-          this.logger.log(`Phone session registered for user ${client.userId} (${deviceName})`);
+          this.logger.log(`Phone session registered for user ${truncateId(client.userId)}`);
         } catch (error) {
-          this.logger.error(`Error handling phone session: ${error}`);
+          this.logger.error(`Error handling phone session: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      // Cloud relay: route mobile to paired CLI (if mobile has a relay token or known mobileDeviceId)
+      const mobileDeviceIdAuth = client.handshake.auth?.mobileDeviceId as string | undefined;
+      const mobileRelayToken = client.handshake.auth?.relayToken as string | undefined;
+      if (mobileDeviceIdAuth && rawClientType === 'mobile') {
+        // Look up pairing using hashed mobile ID
+        const mobileHash = hashDeviceId(mobileDeviceIdAuth);
+        const pairedCliHash = this.mobileToCli.get(mobileHash);
+        if (pairedCliHash) {
+          const pair = this.pairedDevices.get(pairedCliHash);
+          if (pair) {
+            // Verify relay token if provided
+            if (mobileRelayToken && pair.mobileRelayToken !== mobileRelayToken) {
+              this.logger.warn(`Mobile ${truncateId(mobileDeviceIdAuth)} relay token mismatch — allowing (may need re-pair)`);
+            }
+
+            // Resolve raw CLI device ID from live routing maps for Socket.io room join
+            const rawCliDeviceId = this.findRawCliDeviceIdByHash(pairedCliHash);
+            if (rawCliDeviceId) {
+              // Join mobile into CLI's device room for event routing
+              client.join(`device:${rawCliDeviceId}`);
+
+              // Notify CLI that mobile is connected
+              const cliSocket = this.cliClientSockets.get(rawCliDeviceId);
+              if (cliSocket?.connected) {
+                cliSocket.emit('mobile_connected', { deviceId: mobileDeviceIdAuth });
+              }
+
+              // Relay auth: derive mobile's userId from the paired CLI device
+              // (mobile authenticates via relayToken, not Supabase JWT)
+              const resolvedUserId = cliSocket?.userId || this.deviceOwnershipCache.get(rawCliDeviceId);
+              if (resolvedUserId) {
+                client.userId = resolvedUserId;
+                if (!this.userConnections.has(resolvedUserId)) {
+                  this.userConnections.set(resolvedUserId, new Set());
+                }
+                this.userConnections.get(resolvedUserId)!.add(client.id);
+                client.join(`user:${resolvedUserId}`);
+                this.logger.log(`Mobile ${truncateId(mobileDeviceIdAuth)} authenticated via relay (userId: ${truncateId(resolvedUserId)})`);
+              } else {
+                this.logger.warn(`Mobile ${truncateId(mobileDeviceIdAuth)} routed to CLI ${truncateId(rawCliDeviceId)} but no userId resolved — handlers requiring auth will fail`);
+              }
+
+              this.logger.log(`Mobile ${truncateId(mobileDeviceIdAuth)} routed to CLI device ${truncateId(rawCliDeviceId)}`);
+            }
+          }
         }
       }
 
@@ -343,6 +608,10 @@ export class WebsocketGateway
 
           try {
             const device = await this.devicesService.updateStatus(deviceId, DeviceStatus.ONLINE);
+            // Populate ownership cache
+            if (device.userId && device.userId !== 'pending') {
+              this.deviceOwnershipCache.set(deviceId, device.userId);
+            }
             // Set client.userId from device if not already set via token
             if (!client.userId && device.userId && device.userId !== 'pending') {
               client.userId = device.userId;
@@ -352,7 +621,7 @@ export class WebsocketGateway
               }
               this.userConnections.get(device.userId)!.add(client.id);
               client.join(`user:${device.userId}`);
-              this.logger.log(`Set client.userId from device: ${device.userId}`);
+              this.logger.log(`Set client.userId from device: ${truncateId(device.userId)}`);
             }
             // Notify user that device/session is active
             if (device.userId && device.userId !== 'pending') {
@@ -367,12 +636,12 @@ export class WebsocketGateway
               });
             }
           } catch (error) {
-            this.logger.error(`Error updating device status: ${error}`);
+            this.logger.error(`Error updating device status: ${error instanceof Error ? error.message : String(error)}`);
 
             // Auto-register device if it doesn't exist but we have a valid userId
             const effectiveUserId = client.userId || authUserId;
             if (effectiveUserId) {
-              this.logger.log(`Auto-registering device ${deviceId} for user ${effectiveUserId}`);
+              this.logger.log(`Auto-registering device ${deviceId} for user ${truncateId(effectiveUserId)}`);
               try {
                 const newDevice = await this.devicesService.autoRegister(deviceId, effectiveUserId, {
                   name: deviceName,
@@ -381,6 +650,8 @@ export class WebsocketGateway
                   type: 'desktop',
                 });
                 this.logger.log(`Device ${deviceId} auto-registered successfully`);
+                // Populate ownership cache after auto-register
+                this.deviceOwnershipCache.set(deviceId, effectiveUserId);
 
                 // Set client.userId if not already set
                 if (!client.userId) {
@@ -403,7 +674,7 @@ export class WebsocketGateway
                   sessionId,
                 });
               } catch (autoRegisterError) {
-                this.logger.error(`Failed to auto-register device: ${autoRegisterError}`);
+                this.logger.error(`Failed to auto-register device: ${autoRegisterError instanceof Error ? autoRegisterError.message : String(autoRegisterError)}`);
                 // Still set userId from CLI auth as fallback
                 if (!client.userId && authUserId) {
                   client.userId = authUserId;
@@ -412,7 +683,7 @@ export class WebsocketGateway
                   }
                   this.userConnections.get(authUserId)!.add(client.id);
                   client.join(`user:${authUserId}`);
-                  this.logger.log(`Set client.userId from CLI auth (auto-register failed): ${authUserId}`);
+                  this.logger.log(`Set client.userId from CLI auth (auto-register failed): ${truncateId(authUserId)}`);
                 }
               }
             } else {
@@ -429,7 +700,7 @@ export class WebsocketGateway
           }
           this.userConnections.get(authUserId)!.add(client.id);
           client.join(`user:${authUserId}`);
-          this.logger.log(`Set client.userId from CLI auth: ${authUserId}`);
+          this.logger.log(`Set client.userId from CLI auth: ${truncateId(authUserId)}`);
         }
 
         // Join session-specific room
@@ -440,7 +711,7 @@ export class WebsocketGateway
           client.join(`device:${deviceId}`);
         }
 
-        this.logger.log(`Session-scoped CLI connected: session=${sessionId}, device=${deviceId}, userId=${client.userId} (socket: ${client.id})`);
+        this.logger.log(`Session-scoped CLI connected: session=${sessionId}, device=${deviceId}, userId=${truncateId(client.userId)} (socket: ${client.id})`);
 
         // Track by userId for cross-device routing (allows mobile to find CLI regardless of deviceId)
         if (client.userId) {
@@ -448,7 +719,7 @@ export class WebsocketGateway
             this.userCliConnections.set(client.userId, new Set());
           }
           this.userCliConnections.get(client.userId)!.add(sessionId);
-          this.logger.log(`Added CLI session ${sessionId} to user ${client.userId}'s CLI connections`);
+          this.logger.log(`Added CLI session ${sessionId} to user ${truncateId(client.userId)}'s CLI connections`);
         }
       }
       // Handle legacy device-scoped connections
@@ -469,6 +740,10 @@ export class WebsocketGateway
         try {
           // Update device status to online
           const device = await this.devicesService.updateStatus(deviceId, DeviceStatus.ONLINE);
+          // Populate ownership cache
+          if (device.userId && device.userId !== 'pending') {
+            this.deviceOwnershipCache.set(deviceId, device.userId);
+          }
 
           // Notify user that device is online
           if (device.userId && device.userId !== 'pending') {
@@ -479,12 +754,12 @@ export class WebsocketGateway
             });
           }
         } catch (error) {
-          this.logger.error(`Error updating device status: ${error}`);
+          this.logger.error(`Error updating device status: ${error instanceof Error ? error.message : String(error)}`);
 
           // Auto-register device if it doesn't exist but we have a valid userId
           const effectiveUserId = client.userId || authUserId;
           if (effectiveUserId) {
-            this.logger.log(`Auto-registering device ${deviceId} for user ${effectiveUserId}`);
+            this.logger.log(`Auto-registering device ${deviceId} for user ${truncateId(effectiveUserId)}`);
             try {
               const newDevice = await this.devicesService.autoRegister(deviceId, effectiveUserId, {
                 name: deviceName,
@@ -493,6 +768,8 @@ export class WebsocketGateway
                 type: 'desktop',
               });
               this.logger.log(`Device ${deviceId} auto-registered successfully`);
+              // Populate ownership cache after auto-register
+              this.deviceOwnershipCache.set(deviceId, effectiveUserId);
 
               // Set client.userId if not already set
               if (!client.userId) {
@@ -511,7 +788,7 @@ export class WebsocketGateway
                 cliVersion,
               });
             } catch (autoRegisterError) {
-              this.logger.error(`Failed to auto-register device: ${autoRegisterError}`);
+              this.logger.error(`Failed to auto-register device: ${autoRegisterError instanceof Error ? autoRegisterError.message : String(autoRegisterError)}`);
             }
           } else {
             this.logger.warn(`Cannot auto-register device ${deviceId}: no userId available`);
@@ -521,7 +798,7 @@ export class WebsocketGateway
         this.logger.log(`Device ${deviceId} connected (socket: ${client.id})`);
       }
     } catch (error) {
-      this.logger.error(`Connection error: ${error}`);
+      this.logger.error(`Connection error: ${error instanceof Error ? error.message : String(error)}`);
       // Don't disconnect - allow anonymous connections for initial pairing
     }
   }
@@ -537,7 +814,7 @@ export class WebsocketGateway
         }
       }
       this.logger.log(
-        `User ${client.userId} disconnected (socket: ${client.id})`,
+        `User ${truncateId(client.userId)} disconnected (socket: ${client.id})`,
       );
     }
 
@@ -554,7 +831,7 @@ export class WebsocketGateway
           if (userSessions.size === 0) {
             this.userCliConnections.delete(client.userId);
           }
-          this.logger.log(`Removed CLI session ${client.sessionId} from user ${client.userId}'s CLI connections`);
+          this.logger.log(`Removed CLI session ${client.sessionId} from user ${truncateId(client.userId)}'s CLI connections`);
         }
       }
 
@@ -576,7 +853,7 @@ export class WebsocketGateway
             });
           }
         } catch (error) {
-          this.logger.error(`Error handling session disconnect: ${error}`);
+          this.logger.error(`Error handling session disconnect: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
     }
@@ -633,7 +910,7 @@ export class WebsocketGateway
               }
             }
           } catch (error) {
-            this.logger.error(`Error marking sessions inactive: ${error}`);
+            this.logger.error(`Error marking sessions inactive: ${error instanceof Error ? error.message : String(error)}`);
           }
 
           // Notify user that device is offline
@@ -645,7 +922,7 @@ export class WebsocketGateway
             });
           }
         } catch (error) {
-          this.logger.error(`Error updating device status: ${error}`);
+          this.logger.error(`Error updating device status: ${error instanceof Error ? error.message : String(error)}`);
         }
       }, WebsocketGateway.DISCONNECT_GRACE_PERIOD_MS);
 
@@ -656,15 +933,38 @@ export class WebsocketGateway
       );
     }
 
+    // Clean up CLI cloud relay client connections
+    if (client.clientType === 'cli' && client.deviceId) {
+      this.cliClientConnections.delete(client.deviceId);
+      this.cliClientSockets.delete(client.deviceId);
+
+      // Notify paired mobile that CLI went offline (keyed by hashed ID)
+      const cliHash = hashDeviceId(client.deviceId);
+      const pair = this.pairedDevices.get(cliHash);
+      if (pair) {
+        const mobileSocketId = this.findMobileSocketForDeviceHash(pair.mobileDeviceId);
+        if (mobileSocketId) {
+          const mobileSocket = this.connectedSockets.get(mobileSocketId);
+          if (mobileSocket) {
+            mobileSocket.emit('mobile_disconnected', {
+              deviceId: client.deviceId,
+              reason: 'cli_disconnected',
+            });
+          }
+        }
+      }
+      this.logger.log(`CLI client disconnected: device=${truncateId(client.deviceId)} (socket: ${client.id})`);
+    }
+
     // Clean up phone session for user-scoped connections
     if (client.userId && client.clientType === 'user-scoped') {
       try {
         await this.prisma.phoneSession.deleteMany({
           where: { userId: client.userId, socketId: client.id },
         });
-        this.logger.log(`Phone session cleaned up for user ${client.userId}`);
+        this.logger.log(`Phone session cleaned up for user ${truncateId(client.userId)}`);
       } catch (error) {
-        this.logger.error(`Failed to clean phone session: ${error}`);
+        this.logger.error(`Failed to clean phone session: ${error instanceof Error ? error.message : String(error)}`);
       }
 
       // Notify CLI sessions that mobile user disconnected
@@ -678,27 +978,244 @@ export class WebsocketGateway
         for (const cliSessionId of cliSessions) {
           this.sendToSession(cliSessionId, 'mobile_disconnected', payload);
         }
-        this.logger.log(`Notified ${cliSessions.size} CLI session(s) of mobile disconnect for user ${client.userId}`);
+        this.logger.log(`Notified ${cliSessions.size} CLI session(s) of mobile disconnect for user ${truncateId(client.userId)}`);
       }
     }
   }
 
+  // =============================================
+  // Cloud Relay: Pairing & CLI Routing
+  // =============================================
+
+  /** CLI registers a pairing code with the relay */
+  @SubscribeMessage('register_pairing_code')
+  handleRegisterPairingCode(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { code: string; deviceId: string; deviceName: string; platform: string },
+  ) {
+    if (client.clientType !== 'cli') {
+      return { error: 'Only CLI clients can register pairing codes' };
+    }
+
+    const code = data.code?.toUpperCase();
+    if (!code || code.length < 6 || code.length > 36) {
+      return { error: 'Invalid pairing code format' };
+    }
+
+    this.pairingCodes.set(code, {
+      cliSocketId: client.id,
+      cliDeviceId: data.deviceId,
+      cliDeviceName: data.deviceName || 'CLI Device',
+      platform: data.platform || 'unknown',
+      createdAt: Date.now(),
+    });
+
+    this.logger.log(`CLI ${data.deviceId} registered pairing code ${code.slice(0, 4)}****`);
+    return { success: true };
+  }
+
+  /**
+   * Mobile sends pair_device — check in-memory pairing codes first (cloud relay flow),
+   * then fall through to existing DB-based flow if not found.
+   */
+  @SubscribeMessage('pair_device')
+  async handlePairDevice(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { pairingCode: string; mobileDeviceId: string },
+  ) {
+    const code = data.pairingCode?.toUpperCase();
+    if (!code) {
+      return { error: 'Pairing code required' };
+    }
+
+    // Check in-memory pairing codes (cloud relay flow)
+    const entry = this.pairingCodes.get(code);
+    if (entry) {
+      // Verify code hasn't expired
+      if (Date.now() - entry.createdAt > PAIRING_CODE_TTL_MS) {
+        this.pairingCodes.delete(code);
+        client.emit('pair_device_reject', { reason: 'Pairing code expired' });
+        return { error: 'Pairing code expired' };
+      }
+
+      // Generate relay tokens
+      const pairId = randomUUID();
+      const cliRelayToken = randomBytes(32).toString('hex');
+      const mobileRelayToken = randomBytes(32).toString('hex');
+
+      // Hash device IDs for pairing/auth maps and DB storage
+      const cliHash = hashDeviceId(entry.cliDeviceId);
+      const mobileHash = hashDeviceId(data.mobileDeviceId);
+
+      // Store pairing keyed by hashed CLI device ID
+      this.pairedDevices.set(cliHash, {
+        mobileDeviceId: mobileHash,
+        cliRelayToken,
+        mobileRelayToken,
+        pairId,
+      });
+
+      // Track mobile-to-CLI mapping using hashed IDs
+      this.mobileToCli.set(mobileHash, cliHash);
+
+      // Persist to DB (non-blocking — don't fail pairing if DB write fails)
+      this.prisma.cloudPairing.create({
+        data: {
+          cliDeviceHash: cliHash,
+          mobileDeviceHash: mobileHash,
+          cliRelayToken,
+          mobileRelayToken,
+          pairId,
+        },
+      }).catch((err) => {
+        this.logger.error(`Failed to persist cloud pairing: ${err instanceof Error ? err.message : String(err)}`);
+      });
+
+      // Remove used pairing code
+      this.pairingCodes.delete(code);
+
+      // Forward pair_device to CLI socket with mobile info + relay token
+      const cliSocket = this.cliClientSockets.get(entry.cliDeviceId) || this.connectedSockets.get(entry.cliSocketId);
+      if (cliSocket) {
+        cliSocket.emit('pair_device', {
+          mobileDeviceId: data.mobileDeviceId,
+          pairId,
+          cliRelayToken,
+        });
+
+        // Wait for CLI ack, then forward to mobile with mobileRelayToken
+        cliSocket.once('pair_device_ack', (ackData: any) => {
+          client.emit('pair_device_ack', {
+            deviceId: ackData.deviceId || entry.cliDeviceId,
+            deviceName: ackData.deviceName || entry.cliDeviceName,
+            platform: ackData.platform || entry.platform,
+            mobileDeviceId: data.mobileDeviceId,
+            pairId,
+            mobileRelayToken,
+          });
+
+          // Join mobile into CLI's device room for event routing
+          client.join(`device:${entry.cliDeviceId}`);
+
+          this.logger.log(`Cloud pairing complete: CLI=${entry.cliDeviceId}, mobile=${truncateId(data.mobileDeviceId)}, pair=${pairId}`);
+
+          // Notify CLI that mobile is now connected
+          cliSocket.emit('mobile_connected', { deviceId: data.mobileDeviceId });
+        });
+      } else {
+        client.emit('pair_device_reject', { reason: 'CLI device is no longer connected' });
+        return { error: 'CLI device disconnected' };
+      }
+
+      return { success: true };
+    }
+
+    // Not in in-memory store — fall through to legacy DB-based pairing
+    // (handled by existing devices controller / service)
+    this.logger.log(`Pairing code ${code.slice(0, 4)}**** not in cloud relay — legacy flow`);
+    return { error: 'Invalid pairing code' };
+  }
+
+  /** Mobile registers its Expo push token for cloud relay push notifications */
+  @SubscribeMessage('register_push_token')
+  async handleRegisterPushToken(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { token: string; platform: string; mobileDeviceId?: string },
+  ) {
+    if (!data.token) {
+      return { error: 'Push token required' };
+    }
+
+    // For authenticated (Supabase) users, use existing PushToken table
+    if (client.userId) {
+      await this.notificationsService.registerToken(client.userId, data.token, data.platform || 'unknown');
+      return { success: true };
+    }
+
+    // For cloud relay mobile clients, store on the CloudPairing row
+    const mobileDeviceId = data.mobileDeviceId || (client.handshake.auth?.mobileDeviceId as string);
+    if (!mobileDeviceId) {
+      return { error: 'No mobileDeviceId — cannot associate push token' };
+    }
+
+    const mobileHash = hashDeviceId(mobileDeviceId);
+    try {
+      const updated = await this.prisma.cloudPairing.updateMany({
+        where: { mobileDeviceHash: mobileHash },
+        data: { expoPushToken: data.token, pushPlatform: data.platform || 'unknown' },
+      });
+      if (updated.count > 0) {
+        this.logger.log(`Stored push token for cloud mobile ${truncateId(mobileDeviceId)}`);
+        return { success: true };
+      }
+      return { error: 'No cloud pairing found for this mobile device' };
+    } catch (error) {
+      this.logger.error(`Failed to store push token: ${error instanceof Error ? error.message : String(error)}`);
+      return { error: 'Failed to store push token' };
+    }
+  }
+
+  /** Helper: Find mobile socket ID by hashed mobileDeviceId (compares hash of each socket's raw auth ID) */
+  private findMobileSocketForDeviceHash(mobileDeviceHash: string): string | null {
+    for (const [, socket] of this.connectedSockets) {
+      const auth = socket.handshake?.auth;
+      if (auth?.clientType === 'mobile' && auth?.mobileDeviceId) {
+        if (hashDeviceId(auth.mobileDeviceId as string) === mobileDeviceHash) {
+          return socket.id;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Helper: Resolve raw CLI device ID from cliClientConnections by comparing hashes */
+  private findRawCliDeviceIdByHash(cliHash: string): string | null {
+    for (const rawId of this.cliClientConnections.keys()) {
+      if (hashDeviceId(rawId) === cliHash) {
+        return rawId;
+      }
+    }
+    return null;
+  }
+
   // Mobile app subscribes to device updates
   @SubscribeMessage('subscribe_device')
-  handleSubscribeDevice(
+  async handleSubscribeDevice(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { deviceId: string },
   ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
+
     client.join(`device:${data.deviceId}`);
     this.logger.log(`Socket ${client.id} subscribed to device ${data.deviceId}`);
+
+    // Send current device status so mobile gets accurate state on subscribe
+    const cliSocket = this.cliClientSockets.get(data.deviceId);
+    const isOnline = cliSocket?.connected ?? false;
+    client.emit('device_status', {
+      deviceId: data.deviceId,
+      status: isOnline ? DeviceStatus.ONLINE : DeviceStatus.OFFLINE,
+    });
+
     return { success: true };
   }
 
   @SubscribeMessage('unsubscribe_device')
-  handleUnsubscribeDevice(
+  async handleUnsubscribeDevice(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { deviceId: string },
   ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
     client.leave(`device:${data.deviceId}`);
     return { success: true };
   }
@@ -719,7 +1236,7 @@ export class WebsocketGateway
 
       if (existingSession) {
         // Disconnect the old session
-        const oldSocket = this.server.sockets.sockets.get(
+        const oldSocket = this.connectedSockets.get(
           existingSession.socketId,
         );
         if (oldSocket) {
@@ -737,12 +1254,12 @@ export class WebsocketGateway
         create: { userId: client.userId, socketId: client.id },
       });
 
-      this.logger.log(`Phone session claimed by user ${client.userId}`);
+      this.logger.log(`Phone session claimed by user ${truncateId(client.userId)}`);
       client.emit('claim_phone_session_result', { success: true });
 
       return { success: true };
     } catch (error) {
-      this.logger.error(`Failed to claim phone session: ${error}`);
+      this.logger.error(`Failed to claim phone session: ${error instanceof Error ? error.message : String(error)}`);
       return { error: 'Failed to claim session' };
     }
   }
@@ -881,7 +1398,7 @@ export class WebsocketGateway
   getSessionSocket(sessionId: string): Socket | undefined {
     // Use directly stored socket reference (like Happy does)
     const socket = this.sessionSockets.get(sessionId);
-    this.logger.debug(`getSessionSocket: sessionId=${sessionId}, hasSocket=${!!socket}, connected=${socket?.connected}, sessionSocketsKeys=${JSON.stringify(Array.from(this.sessionSockets.keys()))}`);
+    this.logger.debug(`getSessionSocket: sessionId=${sessionId}, hasSocket=${!!socket}, connected=${socket?.connected}, sessionSocketsCount=${this.sessionSockets.size}`);
     if (socket && socket.connected) {
       return socket;
     }
@@ -981,7 +1498,7 @@ export class WebsocketGateway
 
   // Mobile app responds to approval request
   @SubscribeMessage('approval_response')
-  handleApprovalResponse(
+  async handleApprovalResponse(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -993,6 +1510,9 @@ export class WebsocketGateway
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     // Send response to the device
@@ -1011,12 +1531,15 @@ export class WebsocketGateway
 
   // Mobile app requests to create/initialize a terminal session on device
   @SubscribeMessage('terminal_create')
-  handleTerminalCreate(
+  async handleTerminalCreate(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { terminalSessionId: string; deviceId: string; cwd: string },
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     // Forward to device to create the terminal session
@@ -1056,12 +1579,15 @@ export class WebsocketGateway
 
   // Mobile app sends command to device
   @SubscribeMessage('terminal_command')
-  handleTerminalCommand(
+  async handleTerminalCommand(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: TerminalCommandPayload & { deviceId: string },
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     // Forward command to the device
@@ -1073,7 +1599,7 @@ export class WebsocketGateway
     });
 
     this.logger.log(
-      `Command sent to device ${data.deviceId}: ${data.command.substring(0, 50)}`,
+      `Command sent to device ${data.deviceId} (${data.command?.length || 0} chars)`,
     );
     return { success: true };
   }
@@ -1086,6 +1612,9 @@ export class WebsocketGateway
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     // Check message limit
@@ -1114,13 +1643,13 @@ export class WebsocketGateway
     if (data.sessionKey && this.isSessionConnected(data.sessionKey)) {
       this.sendToSession(data.sessionKey, 'user_message', payload);
       this.logger.log(
-        `User message sent to session ${data.sessionKey}: ${data.message.substring(0, 50)}`,
+        `User message sent to session ${data.sessionKey} (${data.message?.length || 0} chars)`,
       );
     } else {
       // Fallback to device routing
       this.sendToDevice(data.deviceId, 'user_message', payload);
       this.logger.log(
-        `User message sent to device ${data.deviceId}: ${data.message.substring(0, 50)}`,
+        `User message sent to device ${data.deviceId} (${data.message?.length || 0} chars)`,
       );
     }
 
@@ -1129,12 +1658,15 @@ export class WebsocketGateway
 
   // Mobile app sends abort request
   @SubscribeMessage('claude_abort')
-  handleClaudeAbort(
+  async handleClaudeAbort(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { deviceId: string; sessionKey?: string },
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     this.sendToDevice(data.deviceId, 'claude_abort', {
@@ -1148,12 +1680,15 @@ export class WebsocketGateway
 
   // Mobile app sends mode change request
   @SubscribeMessage('claude_mode_change')
-  handleClaudeModeChange(
+  async handleClaudeModeChange(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: ClaudeModeChangePayload,
-  ): { success: true } | { error: string } {
+  ): Promise<{ success: true } | { error: string }> {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     this.sendToDevice(data.deviceId, 'claude_mode_change', {
@@ -1265,12 +1800,16 @@ export class WebsocketGateway
       return { error: 'Not authenticated as device' };
     }
 
-    // Update tool status in DB
-    await this.devicesService.updateToolStatus(
-      client.deviceId,
-      data.toolType,
-      data.status,
-    );
+    // Update tool status in DB (may fail for cloud-only devices not in devices table)
+    try {
+      await this.devicesService.updateToolStatus(
+        client.deviceId,
+        data.toolType,
+        data.status,
+      );
+    } catch {
+      // Cloud-paired device not in legacy devices table — skip DB write
+    }
 
     // Broadcast to device subscribers
     this.server.to(`device:${client.deviceId}`).emit('tool_status_update', {
@@ -1302,7 +1841,7 @@ export class WebsocketGateway
     // Use deviceId from body as fallback (handles race condition where
     // handleConnection hasn't finished setting client.deviceId yet)
     const deviceId = client.deviceId || data.deviceId;
-    this.logger.log(`Received claude_session_update: ${data.sessionKey}, deviceId: ${deviceId}, transcriptPath: ${data.transcriptPath}`);
+    this.logger.log(`Received claude_session_update: ${data.sessionKey}, deviceId: ${deviceId}`);
 
     if (!deviceId) {
       this.logger.warn(`claude_session_update rejected: no deviceId on socket or in data`);
@@ -1336,12 +1875,15 @@ export class WebsocketGateway
 
   // Mobile requests current Claude sessions from device
   @SubscribeMessage('claude_sessions_request')
-  handleClaudeSessionsRequest(
+  async handleClaudeSessionsRequest(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { deviceId: string },
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     // Forward to device - CLI will send back current sessions
@@ -1462,13 +2004,16 @@ export class WebsocketGateway
 
   // Directory listing request from mobile
   @SubscribeMessage('directory_list')
-  handleDirectoryList(
+  async handleDirectoryList(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: { deviceId: string; path: string; requestId: string },
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     // Forward to device
@@ -1511,13 +2056,16 @@ export class WebsocketGateway
 
   // Read file request from mobile (e.g., CLAUDE.md)
   @SubscribeMessage('read_file')
-  handleReadFile(
+  async handleReadFile(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: { deviceId: string; filePath: string; requestId: string },
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     // Forward to device
@@ -1562,7 +2110,7 @@ export class WebsocketGateway
 
   // Tab completion request from mobile
   @SubscribeMessage('tab_complete')
-  handleTabComplete(
+  async handleTabComplete(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -1574,6 +2122,9 @@ export class WebsocketGateway
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     this.sendToDevice(data.deviceId, 'tab_complete', {
@@ -1605,7 +2156,7 @@ export class WebsocketGateway
 
   // Resume Claude session request from mobile
   @SubscribeMessage('claude_resume_session')
-  handleClaudeResumeSession(
+  async handleClaudeResumeSession(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -1617,9 +2168,12 @@ export class WebsocketGateway
       interactivePermissions?: boolean;
     },
   ) {
-    this.logger.log(`Received claude_resume_session from ${client.userId} for device ${data.deviceId}`);
+    this.logger.log(`Received claude_resume_session from ${truncateId(client.userId)} for device ${data.deviceId}`);
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     // Forward to device - CLI will run `claude --resume`
@@ -1638,7 +2192,7 @@ export class WebsocketGateway
 
   // Start new Claude session request from mobile
   @SubscribeMessage('claude_start_session')
-  handleClaudeStartSession(
+  async handleClaudeStartSession(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -1650,6 +2204,9 @@ export class WebsocketGateway
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     // Forward to device - CLI will run `claude` in the directory
@@ -1667,7 +2224,7 @@ export class WebsocketGateway
 
   // Mobile requests transcript history
   @SubscribeMessage('transcript_fetch')
-  handleTranscriptFetch(
+  async handleTranscriptFetch(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -1681,6 +2238,9 @@ export class WebsocketGateway
   ) {
     if (!client.userId) {
       return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
     }
 
     this.sendToDevice(data.deviceId, 'transcript_fetch', {
@@ -1697,7 +2257,7 @@ export class WebsocketGateway
 
   // Mobile subscribes to transcript updates
   @SubscribeMessage('transcript_subscribe')
-  handleTranscriptSubscribe(
+  async handleTranscriptSubscribe(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -1709,9 +2269,12 @@ export class WebsocketGateway
     if (!client.userId) {
       return { error: 'Not authenticated' };
     }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
 
     const roomName = `transcript:${data.sessionKey}`;
-    this.logger.log(`Mobile joining room: ${roomName}, userId: ${client.userId}`);
+    this.logger.log(`Mobile joining room: ${roomName}, userId: ${truncateId(client.userId)}`);
 
     // Join transcript room
     client.join(roomName);
@@ -1748,7 +2311,7 @@ export class WebsocketGateway
   // Mobile subscribes to SDK streaming session (no transcript file watching)
   // This just joins the room to receive claude_message events from CLI
   @SubscribeMessage('transcript_subscribe_sdk')
-  handleTranscriptSubscribeSdk(
+  async handleTranscriptSubscribeSdk(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -1759,9 +2322,12 @@ export class WebsocketGateway
     if (!client.userId) {
       return { error: 'Not authenticated' };
     }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
 
     const roomName = `transcript:${data.sessionKey}`;
-    this.logger.log(`Mobile joining SDK streaming room: ${roomName}, userId: ${client.userId}`);
+    this.logger.log(`Mobile joining SDK streaming room: ${roomName}, userId: ${truncateId(client.userId)}`);
 
     // Join transcript room - CLI sends claude_message events here
     client.join(roomName);
@@ -1777,7 +2343,7 @@ export class WebsocketGateway
         requestedBy: client.userId,
       });
     } else {
-      this.logger.warn(`No CLI connected for user ${client.userId} to start transcript watching`);
+      this.logger.warn(`No CLI connected for user ${truncateId(client.userId)} to start transcript watching`);
     }
 
     return { success: true };
@@ -1817,6 +2383,9 @@ export class WebsocketGateway
     if (!client.userId) {
       return { error: 'Not authenticated' };
     }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
 
     this.logger.log(`Mobile requesting SDK session history: ${data.sessionKey}`);
     this.logger.debug(`sdk_session_history called for sessionKey=${data.sessionKey}, deviceId=${data.deviceId}, claudeSessionId=${data.claudeSessionId}`);
@@ -1849,14 +2418,14 @@ export class WebsocketGateway
     // If not found, try by userId (the Happy-coder pattern)
     if (!cliSocket && client.userId) {
       const userSessions = this.userCliConnections.get(client.userId);
-      this.logger.debug(`Looking for CLI by userId ${client.userId}, userSessions: ${userSessions ? Array.from(userSessions) : 'none'}`);
+      this.logger.debug(`Looking for CLI by userId ${truncateId(client.userId)}, userSessions: ${userSessions ? Array.from(userSessions) : 'none'}`);
       if (userSessions) {
         for (const sessionId of userSessions) {
           const socket = this.sessionSockets.get(sessionId) as AuthenticatedSocket | undefined;
           if (socket?.connected) {
             cliSocket = socket;
             connectedSessionKey = sessionId;
-            this.logger.debug(`Using user's CLI session ${sessionId} for userId ${client.userId}`);
+            this.logger.debug(`Using user's CLI session ${sessionId} for userId ${truncateId(client.userId)}`);
             break;
           }
         }
@@ -1877,8 +2446,8 @@ export class WebsocketGateway
       }
     }
 
-    this.logger.debug(`sessionConnections keys: ${JSON.stringify(Array.from(this.sessionConnections.keys()))}`);
-    this.logger.debug(`userCliConnections keys: ${JSON.stringify(Array.from(this.userCliConnections.keys()))}`);
+    this.logger.debug(`sessionConnections count: ${this.sessionConnections.size}`);
+    this.logger.debug(`userCliConnections count: ${this.userCliConnections.size}`);
     this.logger.debug(`Found CLI socket: ${cliSocket ? 'yes' : 'no'}, via session: ${connectedSessionKey}`);
 
     // Forward to CLI via RPC
@@ -2152,10 +2721,10 @@ export class WebsocketGateway
             },
             unlockedAt: unlocked.userAchievement.unlockedAt,
           });
-          this.logger.log(`Achievement unlocked: ${unlocked.achievement.key} for user ${client.userId}`);
+          this.logger.log(`Achievement unlocked: ${unlocked.achievement.key} for user ${truncateId(client.userId)}`);
         }
       } catch (error) {
-        this.logger.error(`Failed to record token usage: ${error}`);
+        this.logger.error(`Failed to record token usage: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -2221,6 +2790,10 @@ export class WebsocketGateway
 
     const { method, params, targetSessionId, targetDeviceId, timeout = 30000 } = data;
 
+    if (targetDeviceId && !(await this.verifyDeviceOwnership(client.userId, targetDeviceId, client))) {
+      return { ok: false, error: 'Not authorized for this device' };
+    }
+
     // Determine target socket
     let targetSocket: Socket | undefined;
 
@@ -2230,7 +2803,7 @@ export class WebsocketGateway
     } else if (targetDeviceId) {
       const socketId = this.deviceConnections.get(targetDeviceId);
       if (socketId) {
-        targetSocket = this.server.sockets.sockets.get(socketId);
+        targetSocket = this.connectedSockets.get(socketId);
       }
       this.logger.log(`RPC call to device ${targetDeviceId}: ${method}`);
     }
@@ -2247,7 +2820,7 @@ export class WebsocketGateway
 
       return { ok: true, result: response };
     } catch (error) {
-      this.logger.error(`RPC call failed: ${error}`);
+      this.logger.error(`RPC call failed: ${error instanceof Error ? error.message : String(error)}`);
       return {
         ok: false,
         error: error instanceof Error ? error.message : 'RPC call failed',
@@ -2386,7 +2959,7 @@ export class WebsocketGateway
     }
 
     this.logger.log(
-      `Claude approval request: ${data.approvalId} from ${client.deviceId || client.sessionId}, userId: ${userId}`,
+      `Claude approval request: ${data.approvalId} from ${client.deviceId || client.sessionId}, userId: ${truncateId(userId)}`,
     );
 
     // Track pending approval with timeout
@@ -2424,7 +2997,7 @@ export class WebsocketGateway
     const roomName = data.sessionKey ? `transcript:${data.sessionKey}` : `user:${userId}`;
     // Only send to user's channel (mobile is user-scoped, so this is the primary route)
     // Avoid sending to multiple rooms to prevent duplicate messages
-    this.logger.log(`Sending claude_approval_request ${data.approvalId} to user:${userId}`);
+    this.logger.log(`Sending claude_approval_request ${data.approvalId} to user:${truncateId(userId)}`);
 
     this.server.to(`user:${userId}`).emit('claude_approval_request', {
       ...data,
@@ -2442,7 +3015,7 @@ export class WebsocketGateway
         promptText: data.promptText,
       });
     } catch (error) {
-      this.logger.error(`Failed to send push notification: ${error}`);
+      this.logger.error(`Failed to send push notification: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     return { success: true };
@@ -2466,7 +3039,7 @@ export class WebsocketGateway
     }
 
     this.logger.log(
-      `Permission prompt from CLI: ${data.toolName} (${data.promptId}) for user ${client.userId}`,
+      `Permission prompt from CLI: ${data.toolName} (${data.promptId}) for user ${truncateId(client.userId)}`,
     );
 
     // Forward to user's mobile clients
@@ -2486,7 +3059,7 @@ export class WebsocketGateway
         promptText: `Claude wants to use ${data.toolName}`,
       });
     } catch (error) {
-      this.logger.error(`Failed to send push notification for permission prompt: ${error}`);
+      this.logger.error(`Failed to send push notification for permission prompt: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     return { success: true };
@@ -2507,7 +3080,7 @@ export class WebsocketGateway
     }
 
     this.logger.log(
-      `Pending permissions sync from CLI: ${data.prompts?.length || 0} prompt(s) for user ${client.userId}`,
+      `Pending permissions sync from CLI: ${data.prompts?.length || 0} prompt(s) for user ${truncateId(client.userId)}`,
     );
 
     // Forward to user's mobile clients
@@ -2521,7 +3094,7 @@ export class WebsocketGateway
 
   // Permission rules sync from mobile — user's tool approval configuration
   @SubscribeMessage('permission_rules_sync')
-  handlePermissionRulesSync(
+  async handlePermissionRulesSync(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: {
       deviceId?: string;
@@ -2535,6 +3108,9 @@ export class WebsocketGateway
     }
 
     const targetDeviceId = data.deviceId || client.deviceId;
+    if (targetDeviceId && !(await this.verifyDeviceOwnership(client.userId, targetDeviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
     this.logger.log(
       `Permission rules sync: ${data.rules?.length || 0} rule(s) for device ${targetDeviceId}`,
     );
@@ -2550,7 +3126,7 @@ export class WebsocketGateway
 
   // Permission response from mobile — user approved or denied a tool use
   @SubscribeMessage('permission_response')
-  handlePermissionResponse(
+  async handlePermissionResponse(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: {
       promptId: string;
@@ -2563,9 +3139,12 @@ export class WebsocketGateway
     if (!client.userId) {
       return { error: 'Not authenticated' };
     }
+    if (data.deviceId && !(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
 
     this.logger.log(
-      `Permission response: ${data.promptId} -> ${data.decision} from ${client.userId}`,
+      `Permission response: ${data.promptId} -> ${data.decision} from ${truncateId(client.userId)}`,
     );
 
     const responsePayload = {
@@ -2652,7 +3231,7 @@ export class WebsocketGateway
     }
 
     this.logger.log(
-      `Claude approval response: ${data.approvalId} -> ${data.response} from ${client.userId}`,
+      `Claude approval response: ${data.approvalId} -> ${data.response} from ${truncateId(client.userId)}`,
     );
 
     // Complete the pending approval
@@ -2708,7 +3287,7 @@ export class WebsocketGateway
     }
 
     if (!routingSucceeded) {
-      this.logger.error(`Failed to route approval response for ${data.approvalId}: No connected CLI found (sessionKey=${sessionKey}, deviceId=${data.deviceId}, userId=${pending.userId})`);
+      this.logger.error(`Failed to route approval response for ${data.approvalId}: No connected CLI found (sessionKey=${sessionKey}, deviceId=${data.deviceId}, userId=${truncateId(pending.userId)})`);
       return { error: 'No CLI connection found - the CLI may have disconnected' };
     }
 
@@ -2733,7 +3312,7 @@ export class WebsocketGateway
       return { error: 'Not authenticated' };
     }
 
-    this.logger.log(`Rate limit detected for user ${client.userId}: ${data.rateLimitReason}`);
+    this.logger.log(`Rate limit detected for user ${truncateId(client.userId)}: ${data.rateLimitReason}`);
 
     try {
       // Queue the prompt
@@ -2758,7 +3337,7 @@ export class WebsocketGateway
 
       return { success: true, queueItemId: queueItem.id };
     } catch (error) {
-      this.logger.error(`Failed to queue prompt: ${error}`);
+      this.logger.error(`Failed to queue prompt: ${error instanceof Error ? error.message : String(error)}`);
       return { error: 'Failed to queue prompt' };
     }
   }
@@ -2805,7 +3384,7 @@ export class WebsocketGateway
 
       return { success: true };
     } catch (error) {
-      this.logger.error(`Failed to execute queue item: ${error}`);
+      this.logger.error(`Failed to execute queue item: ${error instanceof Error ? error.message : String(error)}`);
       const message = error instanceof Error ? error.message : 'Failed to execute queue item';
       return { error: message };
     }
@@ -2848,7 +3427,7 @@ export class WebsocketGateway
 
       return { success: true };
     } catch (error) {
-      this.logger.error(`Failed to mark queue item completed: ${error}`);
+      this.logger.error(`Failed to mark queue item completed: ${error instanceof Error ? error.message : String(error)}`);
       return { error: 'Failed to update queue item' };
     }
   }
@@ -2865,12 +3444,27 @@ export class WebsocketGateway
       senderDeviceId: string;
       recipientDeviceId: string;
       ephemeralPublicKey: string;
+      identityPublicKey?: string;
+      signature?: string;
     },
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
     if (!data.recipientDeviceId) {
       client.emit('error', { message: 'recipientDeviceId is required' });
       return;
+    }
+    // Verify ownership or pairing of sender and recipient
+    const isPaired = data.senderDeviceId && this.areDevicesPaired(data.senderDeviceId, data.recipientDeviceId);
+    if (!isPaired) {
+      if (data.senderDeviceId && !(await this.verifyDeviceOwnership(client.userId, data.senderDeviceId, client))) {
+        return { error: 'Not authorized for this device' };
+      }
+      if (!(await this.verifyDeviceOwnership(client.userId, data.recipientDeviceId, client))) {
+        return { error: 'Not authorized for this device' };
+      }
     }
 
     // Find recipient socket
@@ -2881,6 +3475,8 @@ export class WebsocketGateway
       recipientSocket.emit('encrypted_key_exchange_init', {
         senderDeviceId: data.senderDeviceId,
         ephemeralPublicKey: data.ephemeralPublicKey,
+        ...(data.identityPublicKey && { identityPublicKey: data.identityPublicKey }),
+        ...(data.signature && { signature: data.signature }),
       });
     }
     // If recipient offline, silently ignore (could store for later delivery)
@@ -2896,12 +3492,26 @@ export class WebsocketGateway
       senderDeviceId: string;
       recipientDeviceId: string;
       ephemeralPublicKey: string;
+      identityPublicKey?: string;
+      signature?: string;
     },
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
     if (!data.recipientDeviceId) {
       client.emit('error', { message: 'recipientDeviceId is required' });
       return;
+    }
+    const isPairedAck = data.senderDeviceId && this.areDevicesPaired(data.senderDeviceId, data.recipientDeviceId);
+    if (!isPairedAck) {
+      if (data.senderDeviceId && !(await this.verifyDeviceOwnership(client.userId, data.senderDeviceId, client))) {
+        return { error: 'Not authorized for this device' };
+      }
+      if (!(await this.verifyDeviceOwnership(client.userId, data.recipientDeviceId, client))) {
+        return { error: 'Not authorized for this device' };
+      }
     }
 
     // Find recipient socket (original sender)
@@ -2910,7 +3520,10 @@ export class WebsocketGateway
     if (recipientSocket) {
       recipientSocket.emit('encrypted_key_exchange_ack', {
         senderDeviceId: data.senderDeviceId,
+        recipientDeviceId: data.recipientDeviceId,
         ephemeralPublicKey: data.ephemeralPublicKey,
+        ...(data.identityPublicKey && { identityPublicKey: data.identityPublicKey }),
+        ...(data.signature && { signature: data.signature }),
       });
     }
   }
@@ -2928,18 +3541,30 @@ export class WebsocketGateway
       payload: {
         ciphertext: string;
         nonce: string;
-        authTag: string;
       };
       messageCounter: number;
       timestamp: string;
     },
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
     if (!data.senderDeviceId || !data.recipientDeviceId) {
       client.emit('error', {
         message: 'senderDeviceId and recipientDeviceId are required',
       });
       return;
+    }
+    // Verify sender owns both devices (or they are paired via cloud relay)
+    const isPairedMsg = this.areDevicesPaired(data.senderDeviceId, data.recipientDeviceId);
+    if (!isPairedMsg) {
+      if (!(await this.verifyDeviceOwnership(client.userId, data.senderDeviceId, client))) {
+        return { error: 'Not authorized for this device' };
+      }
+      if (!(await this.verifyDeviceOwnership(client.userId, data.recipientDeviceId, client))) {
+        return { error: 'Not authorized for this device' };
+      }
     }
 
     // Find recipient socket
@@ -2953,13 +3578,41 @@ export class WebsocketGateway
   }
 
   /**
-   * Find a socket by device ID
+   * Find a socket by device ID (checks CLI devices, session connections, and mobile sockets)
    */
   private findSocketByDeviceId(deviceId: string): AuthenticatedSocket | null {
+    // Check CLI/session device connections first
     const socketId = this.deviceConnections.get(deviceId);
-    if (!socketId) {
-      return null;
+    if (socketId) {
+      return this.connectedSockets.get(socketId) as AuthenticatedSocket | null;
     }
-    return this.server.sockets.sockets.get(socketId) as AuthenticatedSocket | null;
+
+    // Fallback: scan for mobile socket with matching mobileDeviceId (cloud relay)
+    for (const [, socket] of this.connectedSockets) {
+      const auth = socket.handshake?.auth;
+      if (auth?.clientType === 'mobile' && auth?.mobileDeviceId === deviceId) {
+        return socket as AuthenticatedSocket;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Check if two device IDs are paired via cloud relay
+   */
+  private areDevicesPaired(deviceIdA: string, deviceIdB: string): boolean {
+    const hashA = hashDeviceId(deviceIdA);
+    const hashB = hashDeviceId(deviceIdB);
+
+    // Check if A is mobile paired to B (CLI)
+    const pairedCliHash = this.mobileToCli.get(hashA);
+    if (pairedCliHash === hashB) return true;
+
+    // Check if B is mobile paired to A (CLI)
+    const pairedCliHash2 = this.mobileToCli.get(hashB);
+    if (pairedCliHash2 === hashA) return true;
+
+    return false;
   }
 }

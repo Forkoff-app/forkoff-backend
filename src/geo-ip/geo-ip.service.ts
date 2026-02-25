@@ -26,7 +26,7 @@ export class GeoIpService {
   async getCountryFromIp(ip: string): Promise<string | null> {
     // Skip private/local IPs
     if (this.isPrivateIp(ip)) {
-      this.logger.warn(`Skipping private/local IP: ${ip} - country lookup not available for local testing`);
+      this.logger.warn(`Skipping private/local IP: [IP] - country lookup not available for local testing`);
       return null;
     }
 
@@ -47,7 +47,7 @@ export class GeoIpService {
       const data: Partial<IpApiResponse> = await response.json();
 
       if (data.status !== 'success' || !data.countryCode) {
-        this.logger.warn(`Failed to get country for IP ${ip}: ${data.status}`);
+        this.logger.warn(`Failed to get country for IP [IP]: ${data.status}`);
         return null;
       }
 
@@ -57,10 +57,10 @@ export class GeoIpService {
         timestamp: Date.now(),
       });
 
-      this.logger.debug(`IP ${ip} resolved to country: ${data.countryCode}`);
+      this.logger.debug(`IP [IP] resolved to country: ${data.countryCode}`);
       return data.countryCode;
     } catch (error) {
-      this.logger.error(`Failed to lookup IP ${ip}:`, error);
+      this.logger.error(`Failed to lookup IP [IP]:`, error instanceof Error ? error.message : String(error));
       return null;
     }
   }

@@ -156,7 +156,7 @@ export class AppConfigService {
 
       return config.value as unknown as VersionConfig;
     } catch (error) {
-      this.logger.error('Failed to get version config:', error);
+      this.logger.error('Failed to get version config:', error instanceof Error ? error.message : String(error));
       return DEFAULT_VERSION_CONFIG;
     }
   }
@@ -177,7 +177,7 @@ export class AppConfigService {
       },
     });
 
-    this.logger.log(`Version config updated: ${JSON.stringify(updated)}`);
+    this.logger.debug(`Version config updated: ${JSON.stringify(updated)}`);
     return updated;
   }
 
@@ -193,7 +193,7 @@ export class AppConfigService {
 
       return config.value as T;
     } catch (error) {
-      this.logger.error(`Failed to get config ${key}:`, error);
+      this.logger.error(`Failed to get config ${key}:`, error instanceof Error ? error.message : String(error));
       return defaultValue;
     }
   }

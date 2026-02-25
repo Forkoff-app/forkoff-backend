@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PromptQueueItem, QueueSchedule } from '@prisma/client';
+import { truncateId } from '../logging/sanitize';
 
 export type QueueItemStatus =
   | 'PENDING'
@@ -50,7 +51,7 @@ export class PromptQueueService {
       },
     });
 
-    this.logger.log(`Queued prompt for user ${userId}, item ${item.id}`);
+    this.logger.log(`Queued prompt for user ${truncateId(userId)}, item ${truncateId(item.id)}`);
     return item;
   }
 

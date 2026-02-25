@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -12,6 +13,7 @@ import {
   AppConfigService,
   TierLimits,
 } from '../app-config/app-config.service';
+import { truncateId } from '../logging/sanitize';
 
 /**
  * Map a TierLimits object from the DB (where -1 means unlimited)
@@ -36,6 +38,7 @@ export class SubscriptionService {
 
   constructor(
     private prisma: PrismaService,
+    private configService: ConfigService,
     private appConfigService: AppConfigService,
   ) {}
 
@@ -113,7 +116,7 @@ export class SubscriptionService {
       return mapTierLimits(tierConfig);
     } catch (error) {
       this.logger.warn(
-        `Failed to read subscription limits from DB, using hardcoded fallback: ${error}`,
+        `Failed to read subscription limits from DB, using hardcoded fallback: ${error instanceof Error ? error.message : String(error)}`,
       );
       return getLimitsForTier(tier);
     }
@@ -195,7 +198,7 @@ export class SubscriptionService {
           subscription: 'free',
         },
       });
-      this.logger.log(`User ${userId} auto-downgraded from PRO (expired)`);
+      this.logger.log(`User ${truncateId(userId)} auto-downgraded from PRO (expired)`);
     }
   }
 
@@ -436,6 +439,163 @@ export class SubscriptionService {
       },
     });
     this.logger.log(`Monthly counters reset for ${result.count} users`);
+  }
+
+  /**
+   * Verify an Apple App Store receipt and activate subscription.
+   * Uses Apple's verifyReceipt endpoint to validate the purchase.
+   */
+  async verifyAppleReceipt(
+    userId: string,
+    receipt: string,
+    productId: string,
+  ): Promise<{ success: boolean; subscription?: string; error?: string }> {
+    const sharedSecret = this.configService.get<string>(
+      'APPLE_SHARED_SECRET',
+    );
+
+    if (!sharedSecret) {
+      this.logger.error('APPLE_SHARED_SECRET not configured');
+      return { success: false, error: 'Apple IAP not configured on server' };
+    }
+
+    // Map product ID to subscription tier
+    const validProducts = [
+      'com.forkoff.pro.monthly',
+      'com.forkoff.pro.yearly',
+    ];
+    if (!validProducts.includes(productId)) {
+      return { success: false, error: 'Invalid product ID' };
+    }
+
+    try {
+      // Try production first, fall back to sandbox
+      let verifyResult = await this.callAppleVerifyReceipt(
+        receipt,
+        sharedSecret,
+        false,
+      );
+
+      // Status 21007 = sandbox receipt sent to production, retry with sandbox
+      if (verifyResult.status === 21007) {
+        verifyResult = await this.callAppleVerifyReceipt(
+          receipt,
+          sharedSecret,
+          true,
+        );
+      }
+
+      if (verifyResult.status !== 0) {
+        this.logger.warn(
+          `Apple receipt verification failed with status ${verifyResult.status} for user ${truncateId(userId)}`,
+        );
+        return {
+          success: false,
+          error: `Receipt verification failed (status ${verifyResult.status})`,
+        };
+      }
+
+      // Find the matching subscription in the receipt
+      const latestReceiptInfo =
+        verifyResult.latest_receipt_info || [];
+      const matchingPurchase = latestReceiptInfo
+        .filter(
+          (item: any) =>
+            item.product_id === productId ||
+            validProducts.includes(item.product_id),
+        )
+        .sort(
+          (a: any, b: any) =>
+            parseInt(b.expires_date_ms || '0') -
+            parseInt(a.expires_date_ms || '0'),
+        )[0];
+
+      if (!matchingPurchase) {
+        return { success: false, error: 'No matching subscription found in receipt' };
+      }
+
+      // Check if subscription is active
+      const expiresDateMs = parseInt(
+        matchingPurchase.expires_date_ms || '0',
+      );
+      const isActive = expiresDateMs > Date.now();
+
+      if (!isActive) {
+        return { success: false, error: 'Subscription has expired' };
+      }
+
+      const originalTransactionId =
+        matchingPurchase.original_transaction_id;
+      const expiresAt = new Date(expiresDateMs);
+
+      // Check if this transaction is already linked to another user
+      if (originalTransactionId) {
+        const existingUser = await this.prisma.user.findUnique({
+          where: { appleOriginalTransactionId: originalTransactionId },
+          select: { id: true },
+        });
+
+        if (existingUser && existingUser.id !== userId) {
+          return {
+            success: false,
+            error: 'This subscription is already linked to another account',
+          };
+        }
+      }
+
+      // Activate the subscription
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          subscription: 'pro',
+          appleOriginalTransactionId: originalTransactionId || undefined,
+          stripeCurrentPeriodEnd: expiresAt,
+          stripePriceId: matchingPurchase.product_id,
+        },
+      });
+
+      this.logger.log(
+        `User ${truncateId(userId)} activated Apple IAP subscription (product: ${matchingPurchase.product_id}, expires: ${expiresAt.toISOString()})`,
+      );
+
+      return { success: true, subscription: 'pro' };
+    } catch (error) {
+      this.logger.error(
+        `Apple receipt verification error for user ${truncateId(userId)}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { success: false, error: 'Receipt verification failed' };
+    }
+  }
+
+  /**
+   * Call Apple's verifyReceipt endpoint
+   */
+  private async callAppleVerifyReceipt(
+    receipt: string,
+    sharedSecret: string,
+    useSandbox: boolean,
+  ): Promise<any> {
+    const url = useSandbox
+      ? 'https://sandbox.itunes.apple.com/verifyReceipt'
+      : 'https://buy.itunes.apple.com/verifyReceipt';
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        'receipt-data': receipt,
+        password: sharedSecret,
+        'exclude-old-transactions': true,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Apple API returned ${response.status}: ${response.statusText}`,
+      );
+    }
+
+    return response.json();
   }
 
   // Helper: Get next midnight UTC

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppConfigService } from '../app-config/app-config.service';
 import Stripe from 'stripe';
+import { truncateId, maskStripeId } from '../logging/sanitize';
 
 @Injectable()
 export class StripeService {
@@ -51,7 +52,7 @@ export class StripeService {
       data: { stripeCustomerId: customer.id },
     });
 
-    this.logger.log(`Created Stripe customer ${customer.id} for user ${userId}`);
+    this.logger.log(`Created Stripe customer ${maskStripeId(customer.id)} for user ${truncateId(userId)}`);
     return customer.id;
   }
 
@@ -79,7 +80,7 @@ export class StripeService {
       allowPromotionCodes = plansConfig.allowPromotionCodes;
     } catch (error) {
       this.logger.warn(
-        `Failed to read plans config from DB, using env-only price validation: ${error}`,
+        `Failed to read plans config from DB, using env-only price validation: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
@@ -154,13 +155,13 @@ export class StripeService {
 
       case 'invoice.payment_failed':
         this.logger.warn(
-          `Payment failed for invoice ${(event.data.object as Stripe.Invoice).id}`,
+          `Payment failed for invoice ${maskStripeId((event.data.object as Stripe.Invoice).id)}`,
         );
         break;
 
       case 'checkout.session.completed':
         this.logger.log(
-          `Checkout completed: ${(event.data.object as Stripe.Checkout.Session).id}`,
+          `Checkout completed: ${maskStripeId((event.data.object as Stripe.Checkout.Session).id)}`,
         );
         break;
 
@@ -176,7 +177,7 @@ export class StripeService {
     const proPriceId = this.configService.get<string>('STRIPE_PRO_PRICE_ID');
 
     if (priceId !== proPriceId) {
-      this.logger.warn(`Unknown price ID: ${priceId}, defaulting to pro`);
+      this.logger.warn(`Unknown price ID: ${maskStripeId(priceId)}, defaulting to pro`);
     }
 
     return 'pro';
@@ -192,13 +193,13 @@ export class StripeService {
     });
 
     if (!user) {
-      this.logger.warn(`No user found for Stripe customer ${customerId}`);
+      this.logger.warn(`No user found for Stripe customer ${maskStripeId(customerId)}`);
       return;
     }
 
     const priceId = subscription.items.data[0]?.price?.id;
     if (!priceId) {
-      this.logger.warn(`No price ID found in subscription ${subscription.id}`);
+      this.logger.warn(`No price ID found in subscription ${maskStripeId(subscription.id)}`);
       return;
     }
 
@@ -217,7 +218,7 @@ export class StripeService {
     });
 
     this.logger.log(
-      `User ${user.id} subscription updated to ${tier} (expires ${currentPeriodEnd?.toISOString() ?? 'unknown'})`,
+      `User ${truncateId(user.id)} subscription updated to ${tier} (expires ${currentPeriodEnd?.toISOString() ?? 'unknown'})`,
     );
   }
 
@@ -236,13 +237,13 @@ export class StripeService {
     });
 
     if (!user) {
-      this.logger.warn(`No user found for Stripe customer ${customerId}`);
+      this.logger.warn(`No user found for Stripe customer ${maskStripeId(customerId)}`);
       return;
     }
 
     // Don't downgrade if user has lifetime PRO or active voucher/referral PRO
     if (user.isLifetimePro) {
-      this.logger.log(`User ${user.id} has lifetime PRO — keeping PRO after Stripe cancel`);
+      this.logger.log(`User ${truncateId(user.id)} has lifetime PRO — keeping PRO after Stripe cancel`);
       await this.prisma.user.update({
         where: { id: user.id },
         data: {
@@ -256,7 +257,7 @@ export class StripeService {
 
     if (user.proExpiresAt && user.proExpiresAt > new Date()) {
       this.logger.log(
-        `User ${user.id} has active voucher/referral PRO until ${user.proExpiresAt.toISOString()} — keeping PRO after Stripe cancel`,
+        `User ${truncateId(user.id)} has active voucher/referral PRO — keeping PRO after Stripe cancel`,
       );
       await this.prisma.user.update({
         where: { id: user.id },
@@ -279,6 +280,6 @@ export class StripeService {
       },
     });
 
-    this.logger.log(`User ${user.id} downgraded to free after Stripe subscription cancelled`);
+    this.logger.log(`User ${truncateId(user.id)} downgraded to free after Stripe subscription cancelled`);
   }
 }

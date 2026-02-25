@@ -25,6 +25,7 @@ model User {
   stripeSubscriptionId   String?
   stripePriceId          String?
   stripeCurrentPeriodEnd DateTime?
+  appleOriginalTransactionId String? @unique // Apple IAP original transaction ID
   country          String?
   countryUpdatedAt DateTime?
   timezone         String?       @default("UTC")
@@ -544,4 +545,20 @@ model DeviceFingerprint {
 
   @@index([fingerprintHash])
   @@map("device_fingerprints")
+}
+
+// Cloud relay pairing persistence (survives server restarts)
+model CloudPairing {
+  id               String   @id @default(uuid())
+  cliDeviceHash    String   @unique  // SHA-256 truncated hash of cliDeviceId
+  mobileDeviceHash String            // SHA-256 truncated hash of mobileDeviceId
+  cliRelayToken    String            // CSPRNG 32-byte hex token
+  mobileRelayToken String            // CSPRNG 32-byte hex token
+  pairId           String   @unique
+  expoPushToken    String?           // Expo push notification token from paired mobile
+  pushPlatform     String?           // ios | android
+  createdAt        DateTime @default(now())
+
+  @@index([mobileDeviceHash])
+  @@map("cloud_pairings")
 }

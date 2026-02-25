@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PromptQueueService } from './prompt-queue.service';
+import { truncateId } from '../logging/sanitize';
 
 /**
  * Scheduler service for executing queued prompts
@@ -23,14 +24,14 @@ export class QueueSchedulerService implements OnModuleInit {
     // Run every minute
     this.intervalId = setInterval(() => {
       this.runScheduledTasks().catch((err) => {
-        this.logger.error(`Scheduler error: ${err}`);
+        this.logger.error(`Scheduler error: ${err instanceof Error ? err.message : String(err)}`);
       });
     }, 60_000); // 60 seconds
 
     // Also run once at startup after a short delay
     setTimeout(() => {
       this.runScheduledTasks().catch((err) => {
-        this.logger.error(`Initial scheduler run error: ${err}`);
+        this.logger.error(`Initial scheduler run error: ${err instanceof Error ? err.message : String(err)}`);
       });
     }, 5000);
 
@@ -56,7 +57,7 @@ export class QueueSchedulerService implements OnModuleInit {
 
     for (const item of dueItems) {
       try {
-        this.logger.log(`Processing scheduled item ${item.id} for user ${item.userId}`);
+        this.logger.log(`Processing scheduled item ${truncateId(item.id)} for user ${truncateId(item.userId)}`);
 
         // Mark as executing
         await this.queueService.markExecuting(item.id);
@@ -65,9 +66,9 @@ export class QueueSchedulerService implements OnModuleInit {
         // This will be handled by the WebSocket gateway integration
         // For now, we just mark it as executing and the mobile app will handle it
 
-        this.logger.log(`Scheduled item ${item.id} marked as executing`);
+        this.logger.log(`Scheduled item ${truncateId(item.id)} marked as executing`);
       } catch (error) {
-        this.logger.error(`Failed to process scheduled item ${item.id}: ${error}`);
+        this.logger.error(`Failed to process scheduled item ${truncateId(item.id)}: ${error instanceof Error ? error.message : String(error)}`);
         await this.queueService.markFailed(
           item.id,
           error instanceof Error ? error.message : 'Unknown error',
@@ -86,7 +87,7 @@ export class QueueSchedulerService implements OnModuleInit {
       try {
         // Check if current time matches user's scheduled time
         if (this.isTimeToExecute(schedule.scheduledTime, schedule.user.timezone, schedule.daysOfWeek)) {
-          this.logger.log(`Executing scheduled queue for user ${schedule.userId}`);
+          this.logger.log(`Executing scheduled queue for user ${truncateId(schedule.userId)}`);
 
           // Get next pending item
           const item = await this.queueService.getNextPendingItem(schedule.userId);
@@ -97,11 +98,11 @@ export class QueueSchedulerService implements OnModuleInit {
             // TODO: Emit websocket event to execute the prompt
             // This will be handled by the WebSocket gateway integration
 
-            this.logger.log(`Queue item ${item.id} triggered for user ${schedule.userId}`);
+            this.logger.log(`Queue item ${truncateId(item.id)} triggered for user ${truncateId(schedule.userId)}`);
           }
         }
       } catch (error) {
-        this.logger.error(`Failed to process schedule for user ${schedule.userId}: ${error}`);
+        this.logger.error(`Failed to process schedule for user ${truncateId(schedule.userId)}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   }

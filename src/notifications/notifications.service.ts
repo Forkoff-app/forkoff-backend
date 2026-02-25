@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { truncateId } from '../logging/sanitize';
 
 /**
  * Expo Push Notification message structure.
@@ -132,9 +133,9 @@ export class NotificationsService {
           platform,
         },
       });
-      this.logger.log(`Registered push token for user ${userId}`);
+      this.logger.log(`Registered push token for user ${truncateId(userId)}`);
     } catch (error) {
-      this.logger.error(`Failed to register push token for user ${userId}: ${error instanceof Error ? error.message : error}`);
+      this.logger.error(`Failed to register push token for user ${truncateId(userId)}: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
   }
@@ -158,9 +159,9 @@ export class NotificationsService {
           token,
         },
       });
-      this.logger.log(`Unregistered push token for user ${userId}`);
+      this.logger.log(`Unregistered push token for user ${truncateId(userId)}`);
     } catch (error) {
-      this.logger.error(`Failed to unregister push token for user ${userId}: ${error instanceof Error ? error.message : error}`);
+      this.logger.error(`Failed to unregister push token for user ${truncateId(userId)}: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
   }
@@ -183,7 +184,7 @@ export class NotificationsService {
       });
       return tokens.map((t) => t.token);
     } catch (error) {
-      this.logger.error(`Failed to get push tokens for user ${userId}: ${error instanceof Error ? error.message : error}`);
+      this.logger.error(`Failed to get push tokens for user ${truncateId(userId)}: ${error instanceof Error ? error.message : error}`);
       return []; // Return empty array to allow graceful degradation
     }
   }
@@ -208,7 +209,7 @@ export class NotificationsService {
   ): Promise<void> {
     const tokens = await this.getUserTokens(userId);
     if (tokens.length === 0) {
-      this.logger.warn(`No push tokens found for user ${userId}`);
+      this.logger.warn(`No push tokens found for user ${truncateId(userId)}`);
       return;
     }
 
@@ -277,7 +278,7 @@ export class NotificationsService {
     tickets.forEach((ticket, index) => {
       if (ticket.status === 'error') {
         this.logger.error(
-          `Push notification failed for ${messages[index].to}: ${ticket.message}`,
+          `Push notification failed for token ${String(messages[index].to).substring(0, 15)}...: ${ticket.message}`,
         );
         // Handle invalid tokens (remove them)
         if (ticket.details?.error === 'DeviceNotRegistered') {
@@ -306,9 +307,9 @@ export class NotificationsService {
       await this.prisma.pushToken.deleteMany({
         where: { token },
       });
-      this.logger.log(`Removed invalid push token: ${token}`);
+      this.logger.log(`Removed invalid push token: ${token.substring(0, 8)}...`);
     } catch (error) {
-      this.logger.error(`Failed to remove invalid push token ${token}: ${error instanceof Error ? error.message : error}`);
+      this.logger.error(`Failed to remove invalid push token ${token.substring(0, 8)}...: ${error instanceof Error ? error.message : error}`);
     }
   }
 
@@ -415,6 +416,46 @@ export class NotificationsService {
    * @param {string} data.promptText - The approval prompt text (truncated to 100 chars)
    * @returns {Promise<void>}
    */
+  async broadcastToAll(
+    title: string,
+    body: string,
+    data?: Record<string, unknown>,
+  ): Promise<{ totalTokens: number; sent: number }> {
+    // Collect tokens from both Supabase-authenticated users and cloud relay pairings
+    const [legacyTokens, cloudPairings] = await Promise.all([
+      this.prisma.pushToken.findMany({ select: { token: true } }),
+      this.prisma.cloudPairing.findMany({
+        where: { expoPushToken: { not: null } },
+        select: { expoPushToken: true },
+      }),
+    ]);
+
+    // Deduplicate tokens (a device could exist in both tables)
+    const tokenSet = new Set<string>();
+    for (const t of legacyTokens) tokenSet.add(t.token);
+    for (const p of cloudPairings) if (p.expoPushToken) tokenSet.add(p.expoPushToken);
+
+    const allTokens = Array.from(tokenSet);
+    if (allTokens.length === 0) return { totalTokens: 0, sent: 0 };
+
+    const messages: ExpoPushMessage[] = allTokens.map((token) => ({
+      to: token,
+      title,
+      body,
+      data,
+      sound: 'default' as const,
+      priority: 'high' as const,
+    }));
+
+    const BATCH_SIZE = 100;
+    for (let i = 0; i < messages.length; i += BATCH_SIZE) {
+      const batch = messages.slice(i, i + BATCH_SIZE);
+      await this.sendExpoPushNotifications(batch);
+    }
+
+    return { totalTokens: allTokens.length, sent: allTokens.length };
+  }
+
   async sendApprovalNotification(
     userId: string,
     approvalId: string,

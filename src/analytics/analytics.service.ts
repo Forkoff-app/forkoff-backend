@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Decimal } from '@prisma/client/runtime/library';
+import { truncateId } from '../logging/sanitize';
 
 // Token pricing (Claude 3.5 Sonnet pricing as of 2024)
 const INPUT_TOKEN_COST_PER_MILLION = 3.0; // $3 per 1M input tokens
@@ -86,7 +87,7 @@ export class AnalyticsService {
     });
 
     this.logger.debug(
-      `Recorded usage for user ${userId}: ${data.inputTokens} input, ${data.outputTokens} output`,
+      `Recorded usage for user ${truncateId(userId)}: ${data.inputTokens} input, ${data.outputTokens} output`,
     );
   }
 

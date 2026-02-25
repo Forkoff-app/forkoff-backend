@@ -36,7 +36,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
         url: request.originalUrl,
         statusCode: status,
         message,
-        stack: exception instanceof Error ? exception.stack : undefined,
+        stack: process.env.NODE_ENV !== 'production' && exception instanceof Error ? exception.stack : undefined,
       });
     }
 

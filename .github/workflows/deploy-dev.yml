@@ -1,0 +1,124 @@
+name: Build & Deploy (Dev)
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPO: 962795992718.dkr.ecr.us-east-1.amazonaws.com/forkoff-backend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t $ECR_REPO:dev-latest -t $ECR_REPO:dev-${{ github.sha }} .
+          docker push $ECR_REPO:dev-latest
+          docker push $ECR_REPO:dev-${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Clean up Docker images on EC2
+        run: |
+          # Clean up old Docker images before deploying
+          CLEANUP_ID=$(aws ssm send-command \
+            --targets "Key=tag:Name,Values=forkoff-backend" \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{"commands":["docker system prune -af"]}' \
+            --comment "Cleanup before dev deploy" \
+            --timeout-seconds 60 \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "Cleanup Command ID: $CLEANUP_ID"
+          sleep 10
+          echo "Cleanup completed"
+
+      - name: Deploy dev to all EC2 instances via SSM
+        run: |
+          # Target all instances in the ASG by tag
+          COMMAND_ID=$(aws ssm send-command \
+            --targets "Key=tag:Name,Values=forkoff-backend" \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{"commands":["/home/ec2-user/deploy-dev.sh"]}' \
+            --comment "Dev deploy from GitHub Actions ${{ github.sha }}" \
+            --timeout-seconds 120 \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: $COMMAND_ID"
+
+          # Get list of target instances
+          sleep 5
+          INSTANCE_IDS=$(aws ssm list-command-invocations \
+            --command-id "$COMMAND_ID" \
+            --query "CommandInvocations[].InstanceId" \
+            --output text)
+
+          echo "Target instances: $INSTANCE_IDS"
+
+          # Poll each instance for completion
+          ALL_SUCCESS=true
+          for INSTANCE_ID in $INSTANCE_IDS; do
+            echo "Waiting for $INSTANCE_ID..."
+            for i in $(seq 1 60); do
+              STATUS=$(aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$INSTANCE_ID" \
+                --query "Status" \
+                --output text 2>/dev/null || echo "InProgress")
+
+              if [ "$STATUS" = "Success" ]; then
+                echo "$INSTANCE_ID: Dev deploy succeeded"
+                OUTPUT=$(aws ssm get-command-invocation \
+                  --command-id "$COMMAND_ID" \
+                  --instance-id "$INSTANCE_ID" \
+                  --query "StandardOutputContent" \
+                  --output text)
+                echo "$OUTPUT"
+                break
+              elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "TimedOut" ] || [ "$STATUS" = "Cancelled" ]; then
+                echo "$INSTANCE_ID: Dev deploy failed with status $STATUS"
+                ERROR=$(aws ssm get-command-invocation \
+                  --command-id "$COMMAND_ID" \
+                  --instance-id "$INSTANCE_ID" \
+                  --query "[StandardOutputContent, StandardErrorContent]" \
+                  --output text)
+                echo "$ERROR"
+                ALL_SUCCESS=false
+                break
+              fi
+              sleep 5
+            done
+          done
+
+          if [ "$ALL_SUCCESS" != "true" ]; then
+            echo "One or more instances failed to deploy"
+            exit 1
+          fi

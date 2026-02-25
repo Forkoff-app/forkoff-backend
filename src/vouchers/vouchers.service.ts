@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { VoucherBenefitType } from '@prisma/client';
+import { truncateId, maskCode } from '../logging/sanitize';
 import {
   VoucherRedemptionResponseDto,
   VoucherValidationResponseDto,
@@ -189,7 +190,7 @@ export class VouchersService {
     });
 
     this.logger.log(
-      `User ${userId} redeemed voucher ${normalizedCode} (${voucher.benefitType})`,
+      `User ${truncateId(userId)} redeemed voucher ${maskCode(normalizedCode)} (${voucher.benefitType})`,
     );
 
     return {

@@ -12,6 +12,7 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
+import { truncateId } from '../logging/sanitize';
 import {
   ApiTags,
   ApiOperation,
@@ -44,11 +45,11 @@ export class AuthController {
   async getProfile(@CurrentUser() user: User, @Req() req: Request) {
     // Extract IP for country detection
     const ip = this.extractIp(req);
-    this.logger.log(`/auth/me called for user ${user.id}, IP: ${ip}`);
+    this.logger.log(`/auth/me called for user ${truncateId(user.id)}`);
 
     // Update country if needed (async, don't wait)
     this.authService.updateCountryFromIp(user.id, ip).catch((err) => {
-      this.logger.error('Failed to update country:', err);
+      this.logger.error('Failed to update country:', err instanceof Error ? err.message : String(err));
     });
 
     const [profile, versionConfig, subscriptionLimits, cliVersionConfig] = await Promise.all([

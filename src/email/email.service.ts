@@ -49,15 +49,15 @@ export class EmailService {
 
       if (error) {
         this.logger.error(
-          `Failed to send email to ${options.to}: ${error.message}`,
+          `Failed to send email to [email]: ${error.message}`,
         );
         return false;
       }
 
-      this.logger.log(`Email sent to ${options.to}: ${options.subject}`);
+      this.logger.log(`Email sent to [email]: ${options.subject}`);
       return true;
     } catch (error) {
-      this.logger.error(`Failed to send email to ${options.to}:`, error);
+      this.logger.error(`Failed to send email to [email]:`, error instanceof Error ? error.message : String(error));
       return false;
     }
   }
