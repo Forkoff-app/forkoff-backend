@@ -11,7 +11,7 @@ import {
   ApiResponse,
   ApiBearerAuth,
 } from '@nestjs/swagger';
-import { AppConfigService, VersionConfig, SubscriptionPlansConfig } from './app-config.service';
+import { AppConfigService, VersionConfig } from './app-config.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 
@@ -37,25 +37,6 @@ export class AppConfigController {
     @Body() config: Partial<VersionConfig>,
   ): Promise<VersionConfig> {
     return this.appConfigService.setVersionConfig(config);
-  }
-
-  @Get('plans')
-  @ApiOperation({ summary: 'Get subscription plans configuration' })
-  @ApiResponse({ status: 200, description: 'Returns subscription plans config' })
-  async getSubscriptionPlans(): Promise<SubscriptionPlansConfig> {
-    return this.appConfigService.getSubscriptionPlans();
-  }
-
-  @Put('plans')
-  @UseGuards(JwtAuthGuard, AdminGuard)
-  @ApiBearerAuth('supabase-auth')
-  @ApiOperation({ summary: 'Update subscription plans configuration (admin only)' })
-  @ApiResponse({ status: 200, description: 'Plans config updated' })
-  @ApiResponse({ status: 403, description: 'Admin access required' })
-  async setSubscriptionPlans(
-    @Body() config: Partial<SubscriptionPlansConfig>,
-  ): Promise<SubscriptionPlansConfig> {
-    return this.appConfigService.setSubscriptionPlans(config);
   }
 
   @Get()

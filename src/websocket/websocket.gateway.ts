@@ -18,9 +18,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { AchievementCheckerService } from '../achievements/achievement-checker.service';
 import { PromptQueueService } from '../prompt-queue/prompt-queue.service';
-import { SubscriptionService } from '../subscription/subscription.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { DeviceStatus, MessageRole, ApprovalType } from '@prisma/client';
+import { DeviceStatus } from '@prisma/client';
 import { truncateId } from '../logging/sanitize';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 
@@ -57,24 +56,6 @@ interface PairedDeviceEntry {
 
 /** TTL for pairing codes (10 minutes) */
 const PAIRING_CODE_TTL_MS = 10 * 60 * 1000;
-
-// Chat message payload from AI tool
-interface ChatMessagePayload {
-  sessionId: string;
-  content: string;
-  role: MessageRole;
-  streaming?: boolean;
-  messageId?: string; // for streaming chunks
-}
-
-// Approval request payload from AI tool
-interface ApprovalRequestPayload {
-  sessionId: string;
-  messageId: string;
-  type: ApprovalType;
-  description: string;
-  changes: Record<string, unknown>;
-}
 
 // Terminal command payload
 interface TerminalCommandPayload {
@@ -266,7 +247,6 @@ export class WebsocketGateway
     private analyticsService: AnalyticsService,
     private achievementCheckerService: AchievementCheckerService,
     private promptQueueService: PromptQueueService,
-    private subscriptionService: SubscriptionService,
     private prisma: PrismaService,
   ) {
     const supabaseUrl = configService.get<string>('SUPABASE_URL');
@@ -489,48 +469,6 @@ export class WebsocketGateway
         return;
       }
 
-      // Handle phone session tracking for user-scoped (mobile) connections
-      // Enforced for ALL users — only one mobile device per account
-      const clientType = rawClientType as 'user-scoped' | 'session-scoped' | undefined;
-      if (clientType === 'user-scoped' && client.userId) {
-        try {
-          const deviceName = (client.handshake.auth?.deviceName as string) || 'Unknown device';
-
-          // Check for existing phone session
-          const existingSession = await this.prisma.phoneSession.findUnique({
-            where: { userId: client.userId },
-          });
-
-          if (existingSession && existingSession.socketId !== client.id) {
-            // Auto-kick the old device: emit session_claimed to the OLD socket
-            const oldSocket = this.connectedSockets.get(existingSession.socketId);
-            if (oldSocket) {
-              oldSocket.emit('session_claimed', {
-                message: `Your session was claimed by ${deviceName}`,
-              });
-              // Disconnect old socket after a short delay to ensure the event is delivered
-              setTimeout(() => {
-                oldSocket.disconnect(true);
-              }, 500);
-            }
-
-            this.logger.log(
-              `Phone session auto-claimed for user ${truncateId(client.userId)}: kicked socket ${existingSession.socketId}, new socket ${client.id}`,
-            );
-          }
-
-          // Upsert new phone session (always register, whether first or replacement)
-          await this.prisma.phoneSession.upsert({
-            where: { userId: client.userId },
-            update: { socketId: client.id, deviceInfo: deviceName, lastActiveAt: new Date() },
-            create: { userId: client.userId, socketId: client.id, deviceInfo: deviceName },
-          });
-          this.logger.log(`Phone session registered for user ${truncateId(client.userId)}`);
-        } catch (error) {
-          this.logger.error(`Error handling phone session: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-
       // Cloud relay: route mobile to paired CLI (if mobile has a relay token or known mobileDeviceId)
       const mobileDeviceIdAuth = client.handshake.auth?.mobileDeviceId as string | undefined;
       const mobileRelayToken = client.handshake.auth?.relayToken as string | undefined;
@@ -580,6 +518,7 @@ export class WebsocketGateway
       }
 
       // Get session/device info for CLI connections
+      const clientType = rawClientType as 'user-scoped' | 'session-scoped' | undefined;
       const sessionId = client.handshake.auth?.sessionId as string | undefined;
       const deviceId = client.handshake.auth?.deviceId;
       const authUserId = client.handshake.auth?.userId as string | undefined; // userId passed by CLI
@@ -956,17 +895,8 @@ export class WebsocketGateway
       this.logger.log(`CLI client disconnected: device=${truncateId(client.deviceId)} (socket: ${client.id})`);
     }
 
-    // Clean up phone session for user-scoped connections
+    // Notify CLI sessions that mobile user disconnected
     if (client.userId && client.clientType === 'user-scoped') {
-      try {
-        await this.prisma.phoneSession.deleteMany({
-          where: { userId: client.userId, socketId: client.id },
-        });
-        this.logger.log(`Phone session cleaned up for user ${truncateId(client.userId)}`);
-      } catch (error) {
-        this.logger.error(`Failed to clean phone session: ${error instanceof Error ? error.message : String(error)}`);
-      }
-
       // Notify CLI sessions that mobile user disconnected
       // so they can clear taken-over state and revert to watch-only
       const cliSessions = this.userCliConnections.get(client.userId);
@@ -1220,50 +1150,6 @@ export class WebsocketGateway
     return { success: true };
   }
 
-  // Claim phone session (take over from another device)
-  @SubscribeMessage('claim_phone_session')
-  async handleClaimPhoneSession(
-    @ConnectedSocket() client: AuthenticatedSocket,
-  ) {
-    if (!client.userId) {
-      return { error: 'Not authenticated' };
-    }
-
-    try {
-      const existingSession = await this.prisma.phoneSession.findUnique({
-        where: { userId: client.userId },
-      });
-
-      if (existingSession) {
-        // Disconnect the old session
-        const oldSocket = this.connectedSockets.get(
-          existingSession.socketId,
-        );
-        if (oldSocket) {
-          oldSocket.emit('session_claimed', {
-            message: 'Session taken over by another device',
-          });
-          oldSocket.disconnect(true);
-        }
-      }
-
-      // Register new session
-      await this.prisma.phoneSession.upsert({
-        where: { userId: client.userId },
-        update: { socketId: client.id, lastActiveAt: new Date() },
-        create: { userId: client.userId, socketId: client.id },
-      });
-
-      this.logger.log(`Phone session claimed by user ${truncateId(client.userId)}`);
-      client.emit('claim_phone_session_result', { success: true });
-
-      return { success: true };
-    } catch (error) {
-      this.logger.error(`Failed to claim phone session: ${error instanceof Error ? error.message : String(error)}`);
-      return { error: 'Failed to claim session' };
-    }
-  }
-
   // Map string status to DeviceStatus enum
   private mapDeviceStatus(status: string | undefined): DeviceStatus {
     if (!status) return DeviceStatus.ONLINE;
@@ -1405,128 +1291,6 @@ export class WebsocketGateway
     return undefined;
   }
 
-  // ==================== CHAT EVENTS ====================
-
-  // Subscribe to a chat session for real-time updates
-  @SubscribeMessage('chat_subscribe')
-  handleChatSubscribe(
-    @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: { sessionId: string },
-  ) {
-    client.join(`chat:${data.sessionId}`);
-    this.logger.log(`Socket ${client.id} subscribed to chat ${data.sessionId}`);
-    return { success: true };
-  }
-
-  @SubscribeMessage('chat_unsubscribe')
-  handleChatUnsubscribe(
-    @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: { sessionId: string },
-  ) {
-    client.leave(`chat:${data.sessionId}`);
-    return { success: true };
-  }
-
-  // Device sends chat message (from AI tool)
-  @SubscribeMessage('chat_message')
-  handleChatMessage(
-    @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: ChatMessagePayload,
-  ) {
-    if (!client.deviceId) {
-      return { error: 'Not authenticated as device' };
-    }
-
-    // Broadcast to all subscribers of this chat session
-    this.server.to(`chat:${data.sessionId}`).emit('chat_message', {
-      sessionId: data.sessionId,
-      content: data.content,
-      role: data.role,
-      messageId: data.messageId,
-      streaming: data.streaming,
-      timestamp: new Date().toISOString(),
-    });
-
-    return { success: true };
-  }
-
-  // Device sends streaming chunk
-  @SubscribeMessage('chat_stream')
-  handleChatStream(
-    @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody()
-    data: {
-      sessionId: string;
-      messageId: string;
-      chunk: string;
-      done?: boolean;
-    },
-  ) {
-    if (!client.deviceId) {
-      return { error: 'Not authenticated as device' };
-    }
-
-    this.server.to(`chat:${data.sessionId}`).emit('chat_stream', {
-      sessionId: data.sessionId,
-      messageId: data.messageId,
-      chunk: data.chunk,
-      done: data.done,
-    });
-
-    return { success: true };
-  }
-
-  // Device sends approval request
-  @SubscribeMessage('approval_request')
-  handleApprovalRequest(
-    @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: ApprovalRequestPayload,
-  ) {
-    if (!client.deviceId) {
-      return { error: 'Not authenticated as device' };
-    }
-
-    // Broadcast to chat session subscribers and also to user's general channel
-    this.server.to(`chat:${data.sessionId}`).emit('approval_request', {
-      ...data,
-      deviceId: client.deviceId,
-      timestamp: new Date().toISOString(),
-    });
-
-    return { success: true };
-  }
-
-  // Mobile app responds to approval request
-  @SubscribeMessage('approval_response')
-  async handleApprovalResponse(
-    @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody()
-    data: {
-      approvalId: string;
-      sessionId: string;
-      status: 'APPROVED' | 'REJECTED';
-      deviceId: string;
-    },
-  ) {
-    if (!client.userId) {
-      return { error: 'Not authenticated' };
-    }
-    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
-      return { error: 'Not authorized for this device' };
-    }
-
-    // Send response to the device
-    this.sendToDevice(data.deviceId, 'approval_response', {
-      approvalId: data.approvalId,
-      sessionId: data.sessionId,
-      status: data.status,
-      respondedBy: client.userId,
-      timestamp: new Date().toISOString(),
-    });
-
-    return { success: true };
-  }
-
   // ==================== TERMINAL EVENTS ====================
 
   // Mobile app requests to create/initialize a terminal session on device
@@ -1615,20 +1379,6 @@ export class WebsocketGateway
     }
     if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
       return { error: 'Not authorized for this device' };
-    }
-
-    // Check message limit
-    const result = await this.subscriptionService.recordMessageSent(
-      client.userId,
-    );
-    if (!result.allowed) {
-      client.emit('limit_reached', {
-        limitType: 'messages_daily',
-        currentUsage: result.currentUsage,
-        limit: result.limit,
-        resetAt: result.resetAt,
-      });
-      return { error: 'MESSAGE_LIMIT_REACHED' };
     }
 
     const payload = {

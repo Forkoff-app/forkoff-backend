@@ -3,8 +3,6 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
-  Inject,
-  forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
@@ -19,7 +17,6 @@ import {
 } from '@prisma/client';
 import { CreateDeviceDto, UpdateDeviceDto, RegisterDeviceDto } from './dto';
 import { randomBytes } from 'crypto';
-import { SubscriptionService } from '../subscription/subscription.service';
 
 @Injectable()
 export class DevicesService {
@@ -28,8 +25,6 @@ export class DevicesService {
   constructor(
     private prisma: PrismaService,
     private configService: ConfigService,
-    @Inject(forwardRef(() => SubscriptionService))
-    private subscriptionService: SubscriptionService,
   ) {
     this.pairingCodeExpiryMinutes =
       this.configService.get<number>('PAIRING_CODE_EXPIRY_MINUTES') || 10;
@@ -177,27 +172,6 @@ export class DevicesService {
     // Check if device is already paired to another user
     if (device.userId !== null) {
       throw new ForbiddenException('Device is already paired to another user');
-    }
-
-    // Check device limit
-    const deviceCount = await this.prisma.device.count({ where: { userId } });
-    const limits = await this.subscriptionService.getLimitsForUser(userId);
-
-    if (deviceCount >= limits.maxDevices) {
-      throw new ForbiddenException('DEVICE_LIMIT_REACHED');
-    }
-
-    // Check if this is a re-pair (user already has devices)
-    const isRepair = deviceCount > 0;
-    if (isRepair) {
-      const repairCheck = await this.subscriptionService.checkLimit(
-        userId,
-        'repairs_monthly',
-      );
-      if (!repairCheck.allowed) {
-        throw new ForbiddenException('REPAIR_LIMIT_REACHED');
-      }
-      await this.subscriptionService.recordDeviceRepair(userId);
     }
 
     // Update the device with the user ID and clear pairing info

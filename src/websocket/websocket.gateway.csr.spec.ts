@@ -16,7 +16,6 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { AchievementCheckerService } from '../achievements/achievement-checker.service';
 import { PromptQueueService } from '../prompt-queue/prompt-queue.service';
-import { SubscriptionService } from '../subscription/subscription.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 describe('WebsocketGateway - Connection State Recovery', () => {
@@ -35,13 +34,7 @@ describe('WebsocketGateway - Connection State Recovery', () => {
     findOne: jest.fn(),
   };
 
-  const mockPrismaService = {
-    phoneSession: {
-      findUnique: jest.fn(),
-      upsert: jest.fn(),
-      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
-    },
-  };
+  const mockPrismaService = {};
 
   // Mock server with room-based emit tracking
   const emittedEvents: Array<{ room: string; event: string; data: any }> = [];
@@ -69,7 +62,6 @@ describe('WebsocketGateway - Connection State Recovery', () => {
         { provide: AnalyticsService, useValue: {} },
         { provide: AchievementCheckerService, useValue: {} },
         { provide: PromptQueueService, useValue: {} },
-        { provide: SubscriptionService, useValue: {} },
         { provide: PrismaService, useValue: mockPrismaService },
       ],
     }).compile();
@@ -223,28 +215,6 @@ describe('WebsocketGateway - Connection State Recovery', () => {
       cancelSpy.mockRestore();
     });
 
-    it('should NOT make phone session upsert for recovered connection', async () => {
-      const recoveredClient = {
-        id: 'socket-recovered-6',
-        recovered: true,
-        userId: 'user-1',
-        handshake: {
-          auth: {
-            deviceId: 'device-123',
-            sessionId: 'session-abc',
-            clientType: 'session-scoped',
-          },
-          headers: {},
-        },
-        join: jest.fn(),
-      } as any;
-
-      await gateway.handleConnection(recoveredClient);
-
-      // No Prisma phone session calls
-      expect(mockPrismaService.phoneSession.upsert).not.toHaveBeenCalled();
-      expect(mockPrismaService.phoneSession.findUnique).not.toHaveBeenCalled();
-    });
   });
 
   describe('Non-recovered connections (full registration)', () => {

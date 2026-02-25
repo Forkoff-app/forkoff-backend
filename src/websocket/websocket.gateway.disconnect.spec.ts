@@ -7,7 +7,6 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { AchievementCheckerService } from '../achievements/achievement-checker.service';
 import { PromptQueueService } from '../prompt-queue/prompt-queue.service';
-import { SubscriptionService } from '../subscription/subscription.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 describe('WebsocketGateway - Mobile Disconnect', () => {
@@ -26,11 +25,7 @@ describe('WebsocketGateway - Mobile Disconnect', () => {
     findOne: jest.fn(),
   };
 
-  const mockPrismaService = {
-    phoneSession: {
-      deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
-    },
-  };
+  const mockPrismaService = {};
 
   // Mock server with room-based emit tracking
   const emittedEvents: Array<{ room: string; event: string; data: any }> = [];
@@ -58,7 +53,6 @@ describe('WebsocketGateway - Mobile Disconnect', () => {
         { provide: AnalyticsService, useValue: {} },
         { provide: AchievementCheckerService, useValue: {} },
         { provide: PromptQueueService, useValue: {} },
-        { provide: SubscriptionService, useValue: {} },
         { provide: PrismaService, useValue: mockPrismaService },
       ],
     }).compile();
@@ -177,11 +171,7 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
     markAllInactive: jest.fn().mockResolvedValue({ count: 3, sessionKeys: ['session-1', 'session-2', 'session-3'] }),
   };
 
-  const mockPrismaService = {
-    phoneSession: {
-      deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
-    },
-  };
+  const mockPrismaService = {};
 
   const emittedEvents: Array<{ room: string; event: string; data: any }> = [];
   const mockServer = {
@@ -217,7 +207,6 @@ describe('WebsocketGateway - Device Disconnect Session Cleanup', () => {
         { provide: AnalyticsService, useValue: {} },
         { provide: AchievementCheckerService, useValue: {} },
         { provide: PromptQueueService, useValue: {} },
-        { provide: SubscriptionService, useValue: {} },
         { provide: PrismaService, useValue: mockPrismaService },
       ],
     }).compile();

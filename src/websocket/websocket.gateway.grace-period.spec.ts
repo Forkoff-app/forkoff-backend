@@ -18,7 +18,6 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { AchievementCheckerService } from '../achievements/achievement-checker.service';
 import { PromptQueueService } from '../prompt-queue/prompt-queue.service';
-import { SubscriptionService } from '../subscription/subscription.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 describe('WebsocketGateway - Disconnect Grace Period', () => {
@@ -41,11 +40,7 @@ describe('WebsocketGateway - Disconnect Grace Period', () => {
     markAllInactive: jest.fn().mockResolvedValue({ count: 0, sessionKeys: [] }),
   };
 
-  const mockPrismaService = {
-    phoneSession: {
-      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
-    },
-  };
+  const mockPrismaService = {};
 
   // Mock server
   const emittedEvents: Array<{ room: string; event: string; data: any }> = [];
@@ -74,7 +69,6 @@ describe('WebsocketGateway - Disconnect Grace Period', () => {
         { provide: AnalyticsService, useValue: {} },
         { provide: AchievementCheckerService, useValue: {} },
         { provide: PromptQueueService, useValue: {} },
-        { provide: SubscriptionService, useValue: {} },
         { provide: PrismaService, useValue: mockPrismaService },
       ],
     }).compile();

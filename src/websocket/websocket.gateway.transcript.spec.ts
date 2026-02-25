@@ -7,7 +7,6 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { AchievementCheckerService } from '../achievements/achievement-checker.service';
 import { PromptQueueService } from '../prompt-queue/prompt-queue.service';
-import { SubscriptionService } from '../subscription/subscription.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 describe('WebsocketGateway - Transcript History Routing', () => {
@@ -30,11 +29,7 @@ describe('WebsocketGateway - Transcript History Routing', () => {
     trySetSessionName: jest.fn(),
   };
 
-  const mockPrismaService = {
-    phoneSession: {
-      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
-    },
-  };
+  const mockPrismaService = {};
 
   const emittedEvents: Array<{ room: string; event: string; data: any }> = [];
   const mockServer = {
@@ -61,7 +56,6 @@ describe('WebsocketGateway - Transcript History Routing', () => {
         { provide: AnalyticsService, useValue: {} },
         { provide: AchievementCheckerService, useValue: {} },
         { provide: PromptQueueService, useValue: {} },
-        { provide: SubscriptionService, useValue: {} },
         { provide: PrismaService, useValue: mockPrismaService },
       ],
     }).compile();

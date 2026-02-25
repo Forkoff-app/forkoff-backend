@@ -7,7 +7,6 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { AchievementCheckerService } from '../achievements/achievement-checker.service';
 import { PromptQueueService } from '../prompt-queue/prompt-queue.service';
-import { SubscriptionService } from '../subscription/subscription.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 describe('WebsocketGateway - E2EE', () => {
@@ -52,7 +51,6 @@ describe('WebsocketGateway - E2EE', () => {
         { provide: AnalyticsService, useValue: {} },
         { provide: AchievementCheckerService, useValue: {} },
         { provide: PromptQueueService, useValue: {} },
-        { provide: SubscriptionService, useValue: {} },
         { provide: PrismaService, useValue: {} },
       ],
     }).compile();

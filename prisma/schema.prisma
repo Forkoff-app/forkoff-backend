@@ -18,14 +18,6 @@ model User {
   username         String?       @unique
   name             String?
   avatarUrl        String?
-  subscription     String        @default("free") // free, pro
-  proExpiresAt     DateTime?     // When PRO subscription expires (for voucher/referral benefits)
-  isLifetimePro    Boolean       @default(false) // Permanent PRO access from lifetime voucher
-  stripeCustomerId       String?   @unique
-  stripeSubscriptionId   String?
-  stripePriceId          String?
-  stripeCurrentPeriodEnd DateTime?
-  appleOriginalTransactionId String? @unique // Apple IAP original transaction ID
   country          String?
   countryUpdatedAt DateTime?
   timezone         String?       @default("UTC")
@@ -34,17 +26,10 @@ model User {
 
   // Relations
   devices          Device[]
-  projects         Project[]
-  chatSessions     ChatSession[]
   promptQueue      PromptQueueItem[]
   tokenUsageDaily  TokenUsageDaily[]
   achievements     UserAchievement[]
   queueSchedule    QueueSchedule?
-  subscriptionUsage SubscriptionUsage?
-  phoneSession     PhoneSession?
-  voucherRedemptions VoucherRedemption[]
-  referralProfile  ReferralProfile?
-  referredBy       Referral?     @relation("ReferredUser")
   deviceFingerprints DeviceFingerprint[]
 
   @@map("users")
@@ -73,7 +58,6 @@ model Device {
   // Relations
   user           User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
   connectedTools DeviceTool[]
-  projects       Project[]
   claudeSessions ClaudeSession[]
 
   @@index([userId])
@@ -149,84 +133,6 @@ enum ClaudeSessionState {
   SUSPENDED
 }
 
-// Project model
-model Project {
-  id           String        @id @default(uuid())
-  userId       String
-  deviceId     String
-  name         String
-  path         String
-  language     String?
-  framework    String?
-  description  String?
-  lastModified DateTime      @default(now())
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-
-  // Relations
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  device       Device        @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  chatSessions ChatSession[]
-
-  @@index([userId])
-  @@index([deviceId])
-  @@map("projects")
-}
-
-// Chat session with AI tools
-model ChatSession {
-  id            String        @id @default(uuid())
-  userId        String
-  projectId     String
-  toolType      ToolType
-  title         String        @default("New Chat")
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-
-  // Relations
-  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  project       Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  messages      ChatMessage[]
-
-  @@index([userId])
-  @@index([projectId])
-  @@map("chat_sessions")
-}
-
-// Chat message
-model ChatMessage {
-  id              String          @id @default(uuid())
-  sessionId       String
-  role            MessageRole
-  content         String
-  status          MessageStatus   @default(COMPLETE)
-  timestamp       DateTime        @default(now())
-
-  // Relations
-  session         ChatSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  approvalRequest ApprovalRequest?
-
-  @@index([sessionId])
-  @@map("chat_messages")
-}
-
-// Approval request from AI tool
-model ApprovalRequest {
-  id          String              @id @default(uuid())
-  messageId   String              @unique
-  type        ApprovalType
-  description String
-  changes     Json                // Array of code changes
-  status      ApprovalStatus      @default(PENDING)
-  requestedAt DateTime            @default(now())
-  respondedAt DateTime?
-
-  // Relations
-  message     ChatMessage         @relation(fields: [messageId], references: [id], onDelete: Cascade)
-
-  @@map("approval_requests")
-}
-
 // Enums
 enum DeviceType {
   LAPTOP
@@ -259,45 +165,6 @@ enum ToolStatus {
   ACTIVE
   INACTIVE
   ERROR
-}
-
-enum MessageRole {
-  USER
-  ASSISTANT
-  SYSTEM
-}
-
-enum MessageStatus {
-  PENDING
-  STREAMING
-  COMPLETE
-  ERROR
-}
-
-enum ApprovalType {
-  FILE_CHANGE
-  FILE_CREATION
-  FILE_DELETION
-  COMMAND_EXECUTION
-}
-
-enum ApprovalStatus {
-  PENDING
-  APPROVED
-  REJECTED
-}
-
-// Voucher system enums
-enum VoucherType {
-  LIFETIME_PRO  // Permanent PRO access
-  CAMPAIGN      // Limited redemptions (e.g., 200 users)
-  SINGLE_USE    // One-time randomly generated
-}
-
-enum VoucherBenefitType {
-  FREE_MONTHS      // X months of PRO
-  LIFETIME_PRO     // Permanent PRO
-  DISCOUNT_PERCENT // Future payment integration
 }
 
 // Push notification tokens for mobile devices
@@ -409,130 +276,6 @@ model UserAchievement {
 
   @@unique([userId, achievementId])
   @@map("user_achievements")
-}
-
-// Subscription usage tracking
-model SubscriptionUsage {
-  id                     String   @id @default(uuid())
-  userId                 String   @unique
-
-  // Daily counters (reset at midnight UTC)
-  messagesUsedToday      Int      @default(0)
-  messageLimitResetAt    DateTime @default(now())
-
-  // Monthly counters (reset on 1st of month)
-  sessionsUsedThisMonth  Int      @default(0)
-  repairsUsedThisMonth   Int      @default(0)
-  monthlyLimitResetAt    DateTime @default(now())
-
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
-
-  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("subscription_usage")
-}
-
-// Active phone session tracking (Pro tier)
-model PhoneSession {
-  id           String   @id @default(uuid())
-  userId       String   @unique  // Only one per user
-  socketId     String
-  deviceInfo   String?  // Device name/model
-  connectedAt  DateTime @default(now())
-  lastActiveAt DateTime @default(now())
-
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("phone_sessions")
-}
-
-// Waitlist for pre-launch signups
-model Waitlist {
-  id                  String   @id @default(uuid())
-  email               String   @unique
-  createdAt           DateTime @default(now())
-  confirmationSent    Boolean  @default(false)
-  betaAccessSent      Boolean  @default(false)
-  betaAccessSentAt    DateTime?
-
-  @@map("waitlist")
-}
-
-// Voucher definition
-model Voucher {
-  id                 String             @id @default(uuid())
-  code               String             @unique
-  type               VoucherType
-  benefitType        VoucherBenefitType
-  benefitValue       Int                @default(0) // Months for FREE_MONTHS, percentage for DISCOUNT
-  maxRedemptions     Int?               // null = unlimited
-  currentRedemptions Int                @default(0)
-  validFrom          DateTime           @default(now())
-  validUntil         DateTime?          // null = never expires
-  campaignName       String?
-  description        String?
-  isActive           Boolean            @default(true)
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
-  redemptions        VoucherRedemption[]
-
-  @@index([code])
-  @@index([isActive])
-  @@map("vouchers")
-}
-
-// Voucher redemption record
-model VoucherRedemption {
-  id               String             @id @default(uuid())
-  voucherId        String
-  userId           String
-  benefitType      VoucherBenefitType
-  benefitValue     Int
-  benefitExpiresAt DateTime?          // When the benefit expires (for FREE_MONTHS)
-  redeemedAt       DateTime           @default(now())
-  voucher          Voucher            @relation(fields: [voucherId], references: [id], onDelete: Cascade)
-  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([voucherId, userId])
-  @@index([userId])
-  @@map("voucher_redemptions")
-}
-
-// User's referral profile
-model ReferralProfile {
-  id                  String     @id @default(uuid())
-  userId              String     @unique
-  referralCode        String     @unique
-  totalReferrals      Int        @default(0)
-  successfulReferrals Int        @default(0)
-  rewardMonthsEarned  Int        @default(0)
-  rewardMonthsClaimed Int        @default(0)
-  createdAt           DateTime   @default(now())
-  updatedAt           DateTime   @updatedAt
-  user                User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  referrals           Referral[] @relation("ReferrerProfile")
-
-  @@index([referralCode])
-  @@map("referral_profiles")
-}
-
-// Individual referral record
-model Referral {
-  id                String          @id @default(uuid())
-  referrerProfileId String
-  referredUserId    String          @unique
-  signedUpAt        DateTime        @default(now())
-  convertedAt       DateTime?
-  isConverted       Boolean         @default(false)
-  rewardGranted     Boolean         @default(false)
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
-  referrerProfile   ReferralProfile @relation("ReferrerProfile", fields: [referrerProfileId], references: [id], onDelete: Cascade)
-  referredUser      User            @relation("ReferredUser", fields: [referredUserId], references: [id], onDelete: Cascade)
-
-  @@index([referrerProfileId])
-  @@map("referrals")
 }
 
 // Device fingerprint for one-account-per-device enforcement

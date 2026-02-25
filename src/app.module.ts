@@ -7,8 +7,6 @@ import { HttpLoggingMiddleware } from './logging/http-logging.middleware';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { DevicesModule } from './devices/devices.module';
-import { ProjectsModule } from './projects/projects.module';
-import { ChatModule } from './chat/chat.module';
 import { TerminalModule } from './terminal/terminal.module';
 import { WebsocketModule } from './websocket/websocket.module';
 import { ClaudeSessionsModule } from './claude-sessions/claude-sessions.module';
@@ -18,13 +16,7 @@ import { GeoIpModule } from './geo-ip/geo-ip.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { AchievementsModule } from './achievements/achievements.module';
 import { PromptQueueModule } from './prompt-queue/prompt-queue.module';
-import { SubscriptionModule } from './subscription/subscription.module';
-import { VouchersModule } from './vouchers/vouchers.module';
-import { ReferralsModule } from './referrals/referrals.module';
 import { HealthModule } from './health/health.module';
-import { StripeModule } from './stripe/stripe.module';
-import { EmailModule } from './email/email.module';
-import { WaitlistModule } from './waitlist/waitlist.module';
 import { CryptoModule } from './crypto/crypto.module';
 
 @Module({
@@ -69,8 +61,6 @@ import { CryptoModule } from './crypto/crypto.module';
     // Feature modules
     AuthModule,
     DevicesModule,
-    ProjectsModule,
-    ChatModule,
     TerminalModule,
     ClaudeSessionsModule,
     NotificationsModule,
@@ -79,12 +69,6 @@ import { CryptoModule } from './crypto/crypto.module';
     AnalyticsModule,
     AchievementsModule,
     PromptQueueModule,
-    SubscriptionModule,
-    VouchersModule,
-    ReferralsModule,
-    StripeModule,
-    EmailModule,
-    WaitlistModule,
     CryptoModule,
 
     // WebSocket
