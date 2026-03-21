@@ -398,10 +398,14 @@ export class WebsocketGateway
           const pair = this.pairedDevices.get(cliHash);
           if (pair && pair.cliRelayToken === relayToken) {
             this.logger.log(`CLI ${truncateId(cliDeviceId)} authenticated via relay token`);
-          } else {
+          } else if (pair && pair.cliRelayToken !== relayToken) {
+            // Pair exists but token doesn't match — reject (possible spoofing)
             this.logger.warn(`CLI ${truncateId(cliDeviceId)} relay token mismatch — rejecting connection`);
             client.disconnect(true);
             return;
+          } else {
+            // No pair entry in memory (server restarted) — allow, will re-establish on next pair
+            this.logger.log(`CLI ${truncateId(cliDeviceId)} no in-memory pair entry — allowing connection`);
           }
         }
 
