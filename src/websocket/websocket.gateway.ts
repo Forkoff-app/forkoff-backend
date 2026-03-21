@@ -3297,23 +3297,28 @@ export class WebsocketGateway
     },
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
+    this.logger.log(`E2EE key_exchange_init: sender=${truncateId(data.senderDeviceId || '')}, recipient=${truncateId(data.recipientDeviceId || '')}, clientUserId=${truncateId(client.userId || 'none')}`);
     if (!data.recipientDeviceId) {
       client.emit('error', { message: 'recipientDeviceId is required' });
       return;
     }
     // Allow if devices are paired (cloud relay) — no userId required for paired devices
     const isPaired = data.senderDeviceId && this.areDevicesPaired(data.senderDeviceId, data.recipientDeviceId);
+    this.logger.log(`E2EE key_exchange_init: isPaired=${isPaired}`);
     if (!isPaired && client.userId) {
       if (data.senderDeviceId && !(await this.verifyDeviceOwnership(client.userId, data.senderDeviceId, client))) {
+        this.logger.warn(`E2EE key_exchange_init: sender ownership check failed`);
         return { error: 'Not authorized for this device' };
       }
       if (!(await this.verifyDeviceOwnership(client.userId, data.recipientDeviceId, client))) {
+        this.logger.warn(`E2EE key_exchange_init: recipient ownership check failed`);
         return { error: 'Not authorized for this device' };
       }
     }
 
     // Find recipient socket
     const recipientSocket = this.findSocketByDeviceId(data.recipientDeviceId);
+    this.logger.log(`E2EE key_exchange_init: recipientSocket=${recipientSocket ? 'found' : 'NOT FOUND'}`);
 
     if (recipientSocket) {
       // Forward key exchange init to recipient
