@@ -8,7 +8,7 @@ import {
   ConnectedSocket,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { ConfigService } from '@nestjs/config';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
@@ -156,7 +156,7 @@ interface ClaudeMessagePayload {
   },
 })
 export class WebsocketGateway
-  implements OnGatewayConnection, OnGatewayDisconnect
+  implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
   async afterInit() {
     // When a session gets auto-named from its first user message,
@@ -219,8 +219,9 @@ export class WebsocketGateway
   private sessionSockets = new Map<string, Socket>(); // sessionId -> Socket object (direct reference)
   private userCliConnections = new Map<string, Set<string>>(); // userId -> Set of sessionIds (track CLIs by user for cross-device routing)
 
-  // Device ownership cache: deviceId -> userId (for authorization checks)
-  private deviceOwnershipCache = new Map<string, string>();
+  // Device ownership cache: deviceId -> { userId, cachedAt } (for authorization checks, 5min TTL)
+  private static readonly OWNERSHIP_CACHE_TTL_MS = 5 * 60 * 1000;
+  private deviceOwnershipCache = new Map<string, { userId: string; cachedAt: number }>();
 
   // Grace period: delay marking devices OFFLINE to tolerate brief disconnects (e.g., network blips)
   private static readonly DISCONNECT_GRACE_PERIOD_MS = 5_000;
@@ -275,7 +276,14 @@ export class WebsocketGateway
     client?: AuthenticatedSocket,
   ): Promise<boolean> {
     const cached = this.deviceOwnershipCache.get(deviceId);
-    if (cached !== undefined) return cached === userId;
+    if (cached !== undefined) {
+      // Invalidate stale cache entries (older than 5 minutes)
+      if (Date.now() - cached.cachedAt > WebsocketGateway.OWNERSHIP_CACHE_TTL_MS) {
+        this.deviceOwnershipCache.delete(deviceId);
+      } else {
+        return cached.userId === userId;
+      }
+    }
 
     // Check legacy devices table
     const device = await this.prisma.device.findUnique({
@@ -283,7 +291,7 @@ export class WebsocketGateway
       select: { userId: true },
     });
     if (device?.userId) {
-      this.deviceOwnershipCache.set(deviceId, device.userId);
+      this.deviceOwnershipCache.set(deviceId, { userId: device.userId, cachedAt: Date.now() });
       return device.userId === userId;
     }
 
@@ -296,7 +304,7 @@ export class WebsocketGateway
         const cliHash = hashDeviceId(deviceId);
         const pairedCliHash = this.mobileToCli.get(mobileHash);
         if (pairedCliHash === cliHash) {
-          this.deviceOwnershipCache.set(deviceId, userId);
+          this.deviceOwnershipCache.set(deviceId, { userId, cachedAt: Date.now() });
           return true;
         }
       }
@@ -391,7 +399,9 @@ export class WebsocketGateway
           if (pair && pair.cliRelayToken === relayToken) {
             this.logger.log(`CLI ${truncateId(cliDeviceId)} authenticated via relay token`);
           } else {
-            this.logger.warn(`CLI ${truncateId(cliDeviceId)} relay token mismatch — allowing connection (may need to re-pair)`);
+            this.logger.warn(`CLI ${truncateId(cliDeviceId)} relay token mismatch — rejecting connection`);
+            client.disconnect(true);
+            return;
           }
         }
 
@@ -408,7 +418,7 @@ export class WebsocketGateway
         try {
           const device = await this.devicesService.updateStatus(cliDeviceId, DeviceStatus.ONLINE);
           if (device.userId && device.userId !== 'pending') {
-            this.deviceOwnershipCache.set(cliDeviceId, device.userId);
+            this.deviceOwnershipCache.set(cliDeviceId, { userId: device.userId, cachedAt: Date.now() });
             client.userId = device.userId;
             if (!this.userConnections.has(device.userId)) {
               this.userConnections.set(device.userId, new Set());
@@ -430,7 +440,7 @@ export class WebsocketGateway
           const cliAuthUserId = client.handshake.auth?.userId as string | undefined;
           if (cliAuthUserId) {
             client.userId = cliAuthUserId;
-            this.deviceOwnershipCache.set(cliDeviceId, cliAuthUserId);
+            this.deviceOwnershipCache.set(cliDeviceId, { userId: cliAuthUserId, cachedAt: Date.now() });
             if (!this.userConnections.has(cliAuthUserId)) {
               this.userConnections.set(cliAuthUserId, new Set());
             }
@@ -498,7 +508,7 @@ export class WebsocketGateway
 
               // Relay auth: derive mobile's userId from the paired CLI device
               // (mobile authenticates via relayToken, not Supabase JWT)
-              const resolvedUserId = cliSocket?.userId || this.deviceOwnershipCache.get(rawCliDeviceId);
+              const resolvedUserId = cliSocket?.userId || this.deviceOwnershipCache.get(rawCliDeviceId)?.userId;
               if (resolvedUserId) {
                 client.userId = resolvedUserId;
                 if (!this.userConnections.has(resolvedUserId)) {
@@ -549,7 +559,7 @@ export class WebsocketGateway
             const device = await this.devicesService.updateStatus(deviceId, DeviceStatus.ONLINE);
             // Populate ownership cache
             if (device.userId && device.userId !== 'pending') {
-              this.deviceOwnershipCache.set(deviceId, device.userId);
+              this.deviceOwnershipCache.set(deviceId, { userId: device.userId, cachedAt: Date.now() });
             }
             // Set client.userId from device if not already set via token
             if (!client.userId && device.userId && device.userId !== 'pending') {
@@ -590,7 +600,7 @@ export class WebsocketGateway
                 });
                 this.logger.log(`Device ${deviceId} auto-registered successfully`);
                 // Populate ownership cache after auto-register
-                this.deviceOwnershipCache.set(deviceId, effectiveUserId);
+                this.deviceOwnershipCache.set(deviceId, { userId: effectiveUserId, cachedAt: Date.now() });
 
                 // Set client.userId if not already set
                 if (!client.userId) {
@@ -681,7 +691,7 @@ export class WebsocketGateway
           const device = await this.devicesService.updateStatus(deviceId, DeviceStatus.ONLINE);
           // Populate ownership cache
           if (device.userId && device.userId !== 'pending') {
-            this.deviceOwnershipCache.set(deviceId, device.userId);
+            this.deviceOwnershipCache.set(deviceId, { userId: device.userId, cachedAt: Date.now() });
           }
 
           // Notify user that device is online
@@ -708,7 +718,7 @@ export class WebsocketGateway
               });
               this.logger.log(`Device ${deviceId} auto-registered successfully`);
               // Populate ownership cache after auto-register
-              this.deviceOwnershipCache.set(deviceId, effectiveUserId);
+              this.deviceOwnershipCache.set(deviceId, { userId: effectiveUserId, cachedAt: Date.now() });
 
               // Set client.userId if not already set
               if (!client.userId) {
@@ -805,6 +815,9 @@ export class WebsocketGateway
       // Remove stale socket mapping (reconnect will re-add with new socket ID)
       this.deviceConnections.delete(disconnectedDeviceId);
 
+      // Clear ownership cache so it's re-validated on next connection
+      this.deviceOwnershipCache.delete(disconnectedDeviceId);
+
       this.logger.log(
         `Device ${disconnectedDeviceId} disconnected — starting ${WebsocketGateway.DISCONNECT_GRACE_PERIOD_MS}ms grace period`,
       );
@@ -859,6 +872,20 @@ export class WebsocketGateway
               status: DeviceStatus.OFFLINE,
               cliVersion: disconnectedCliVersion,
             });
+
+            // Send push notification so user knows even if app is backgrounded
+            this.notificationsService
+              .sendPushToUser(
+                device.userId,
+                'Device Offline',
+                `${device.name || 'Your device'} went offline`,
+                { type: 'device_offline', deviceId: disconnectedDeviceId },
+              )
+              .catch((err) =>
+                this.logger.error(
+                  `Failed to send offline push: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+              );
           }
         } catch (error) {
           this.logger.error(`Error updating device status: ${error instanceof Error ? error.message : String(error)}`);
@@ -1231,6 +1258,20 @@ export class WebsocketGateway
     }
   }
 
+  onModuleDestroy() {
+    // Clear pairing code cleanup interval
+    if (this.pairingCodeCleanupInterval) {
+      clearInterval(this.pairingCodeCleanupInterval);
+      this.pairingCodeCleanupInterval = null;
+    }
+
+    // Clear all disconnect grace timers
+    for (const [deviceId, timer] of this.disconnectGraceTimers) {
+      clearTimeout(timer);
+    }
+    this.disconnectGraceTimers.clear();
+  }
+
   // Helper method to send to specific user
   sendToUser(userId: string, event: string, data: unknown): void {
     this.server.to(`user:${userId}`).emit(event, data);
@@ -1321,10 +1362,17 @@ export class WebsocketGateway
 
   // Subscribe to a terminal session
   @SubscribeMessage('terminal_subscribe')
-  handleTerminalSubscribe(
+  async handleTerminalSubscribe(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: { terminalSessionId: string },
+    @MessageBody() data: { terminalSessionId: string; deviceId: string },
   ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
+
     client.join(`terminal:${data.terminalSessionId}`);
     this.logger.log(
       `Socket ${client.id} subscribed to terminal ${data.terminalSessionId}`,
@@ -1333,10 +1381,17 @@ export class WebsocketGateway
   }
 
   @SubscribeMessage('terminal_unsubscribe')
-  handleTerminalUnsubscribe(
+  async handleTerminalUnsubscribe(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: { terminalSessionId: string },
+    @MessageBody() data: { terminalSessionId: string; deviceId: string },
   ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
+
     client.leave(`terminal:${data.terminalSessionId}`);
     return { success: true };
   }
@@ -2041,7 +2096,7 @@ export class WebsocketGateway
 
   // Mobile unsubscribes from transcript updates
   @SubscribeMessage('transcript_unsubscribe')
-  handleTranscriptUnsubscribe(
+  async handleTranscriptUnsubscribe(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -2049,6 +2104,13 @@ export class WebsocketGateway
       sessionKey: string;
     },
   ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
+
     client.leave(`transcript:${data.sessionKey}`);
 
     this.sendToDevice(data.deviceId, 'transcript_unsubscribe', {
@@ -2101,7 +2163,7 @@ export class WebsocketGateway
 
   // Mobile unsubscribes from SDK streaming session
   @SubscribeMessage('transcript_unsubscribe_sdk')
-  handleTranscriptUnsubscribeSdk(
+  async handleTranscriptUnsubscribeSdk(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -2109,6 +2171,13 @@ export class WebsocketGateway
       sessionKey: string;
     },
   ) {
+    if (!client.userId) {
+      return { error: 'Not authenticated' };
+    }
+    if (!(await this.verifyDeviceOwnership(client.userId, data.deviceId, client))) {
+      return { error: 'Not authorized for this device' };
+    }
+
     const roomName = `transcript:${data.sessionKey}`;
     this.logger.log(`Mobile leaving SDK streaming room: ${roomName}`);
     client.leave(roomName);
