@@ -399,12 +399,30 @@ export class WebsocketGateway
           if (pair && pair.cliRelayToken === relayToken) {
             this.logger.log(`CLI ${truncateId(cliDeviceId)} authenticated via relay token`);
           } else if (pair && pair.cliRelayToken !== relayToken) {
-            // Pair exists but token doesn't match — reject (possible spoofing)
-            this.logger.warn(`CLI ${truncateId(cliDeviceId)} relay token mismatch — rejecting connection`);
-            client.disconnect(true);
-            return;
+            // Token mismatch — check if device is registered in DB (legitimate reconnect with rotated token)
+            const dbDevice = await this.prisma.device.findUnique({
+              where: { id: cliDeviceId },
+              select: { userId: true },
+            });
+            if (dbDevice?.userId) {
+              // Device exists in DB — auto-heal: update the stored relay token
+              this.logger.log(`CLI ${truncateId(cliDeviceId)} relay token mismatch but device registered — updating stored token`);
+              pair.cliRelayToken = relayToken;
+              // Persist updated token to DB (non-blocking)
+              this.prisma.cloudPairing.updateMany({
+                where: { cliDeviceHash: cliHash },
+                data: { cliRelayToken: relayToken },
+              }).catch((err) =>
+                this.logger.error(`Failed to update relay token in DB: ${err instanceof Error ? err.message : String(err)}`),
+              );
+            } else {
+              // Unknown device with wrong token — reject
+              this.logger.warn(`CLI ${truncateId(cliDeviceId)} relay token mismatch and device not in DB — rejecting`);
+              client.disconnect(true);
+              return;
+            }
           } else {
-            // No pair entry in memory (server restarted) — allow, will re-establish on next pair
+            // No pair entry in memory — check DB for the device
             this.logger.log(`CLI ${truncateId(cliDeviceId)} no in-memory pair entry — allowing connection`);
           }
         }
@@ -493,9 +511,16 @@ export class WebsocketGateway
         if (pairedCliHash) {
           const pair = this.pairedDevices.get(pairedCliHash);
           if (pair) {
-            // Verify relay token if provided
+            // Verify relay token if provided — auto-heal on mismatch for known devices
             if (mobileRelayToken && pair.mobileRelayToken !== mobileRelayToken) {
-              this.logger.warn(`Mobile ${truncateId(mobileDeviceIdAuth)} relay token mismatch — allowing (may need re-pair)`);
+              this.logger.log(`Mobile ${truncateId(mobileDeviceIdAuth)} relay token mismatch — updating stored token`);
+              pair.mobileRelayToken = mobileRelayToken;
+              this.prisma.cloudPairing.updateMany({
+                where: { mobileDeviceHash: mobileHash },
+                data: { mobileRelayToken },
+              }).catch((err) =>
+                this.logger.error(`Failed to update mobile relay token: ${err instanceof Error ? err.message : String(err)}`),
+              );
             }
 
             // Resolve raw CLI device ID from live routing maps for Socket.io room join
