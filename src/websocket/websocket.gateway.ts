@@ -3297,16 +3297,13 @@ export class WebsocketGateway
     },
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
-    if (!client.userId) {
-      return { error: 'Not authenticated' };
-    }
     if (!data.recipientDeviceId) {
       client.emit('error', { message: 'recipientDeviceId is required' });
       return;
     }
-    // Verify ownership or pairing of sender and recipient
+    // Allow if devices are paired (cloud relay) — no userId required for paired devices
     const isPaired = data.senderDeviceId && this.areDevicesPaired(data.senderDeviceId, data.recipientDeviceId);
-    if (!isPaired) {
+    if (!isPaired && client.userId) {
       if (data.senderDeviceId && !(await this.verifyDeviceOwnership(client.userId, data.senderDeviceId, client))) {
         return { error: 'Not authorized for this device' };
       }
@@ -3345,15 +3342,12 @@ export class WebsocketGateway
     },
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
-    if (!client.userId) {
-      return { error: 'Not authenticated' };
-    }
     if (!data.recipientDeviceId) {
       client.emit('error', { message: 'recipientDeviceId is required' });
       return;
     }
     const isPairedAck = data.senderDeviceId && this.areDevicesPaired(data.senderDeviceId, data.recipientDeviceId);
-    if (!isPairedAck) {
+    if (!isPairedAck && client.userId) {
       if (data.senderDeviceId && !(await this.verifyDeviceOwnership(client.userId, data.senderDeviceId, client))) {
         return { error: 'Not authorized for this device' };
       }
@@ -3395,9 +3389,6 @@ export class WebsocketGateway
     },
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
-    if (!client.userId) {
-      return { error: 'Not authenticated' };
-    }
     if (!data.senderDeviceId || !data.recipientDeviceId) {
       client.emit('error', {
         message: 'senderDeviceId and recipientDeviceId are required',
@@ -3406,7 +3397,7 @@ export class WebsocketGateway
     }
     // Verify sender owns both devices (or they are paired via cloud relay)
     const isPairedMsg = this.areDevicesPaired(data.senderDeviceId, data.recipientDeviceId);
-    if (!isPairedMsg) {
+    if (!isPairedMsg && client.userId) {
       if (!(await this.verifyDeviceOwnership(client.userId, data.senderDeviceId, client))) {
         return { error: 'Not authorized for this device' };
       }
