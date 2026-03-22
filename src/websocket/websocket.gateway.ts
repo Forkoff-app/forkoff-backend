@@ -868,6 +868,14 @@ export class WebsocketGateway
         this.logger.log(`Grace period expired for device ${disconnectedDeviceId} — marking OFFLINE`);
 
         try {
+          // Check if device is already offline — skip notification if so
+          // (prevents duplicate notifications on server restart)
+          const currentDevice = await this.prisma.device.findUnique({
+            where: { id: disconnectedDeviceId },
+            select: { status: true },
+          });
+          const wasAlreadyOffline = currentDevice?.status === DeviceStatus.OFFLINE;
+
           const device = await this.devicesService.updateStatus(
             disconnectedDeviceId,
             DeviceStatus.OFFLINE,
@@ -902,19 +910,22 @@ export class WebsocketGateway
               cliVersion: disconnectedCliVersion,
             });
 
-            // Send push notification so user knows even if app is backgrounded
-            this.notificationsService
-              .sendPushToUser(
-                device.userId,
-                'Device Offline',
-                `${device.name || 'Your device'} went offline`,
-                { type: 'device_offline', deviceId: disconnectedDeviceId },
-              )
-              .catch((err) =>
-                this.logger.error(
-                  `Failed to send offline push: ${err instanceof Error ? err.message : String(err)}`,
-                ),
-              );
+            // Send push notification only if device was previously online
+            // (prevents duplicate notifications on server restart / reconnect cycles)
+            if (!wasAlreadyOffline) {
+              this.notificationsService
+                .sendPushToUser(
+                  device.userId,
+                  'Device Offline',
+                  `${device.name || 'Your device'} went offline`,
+                  { type: 'device_offline', deviceId: disconnectedDeviceId },
+                )
+                .catch((err) =>
+                  this.logger.error(
+                    `Failed to send offline push: ${err instanceof Error ? err.message : String(err)}`,
+                  ),
+                );
+            }
           }
         } catch (error) {
           this.logger.error(`Error updating device status: ${error instanceof Error ? error.message : String(error)}`);
