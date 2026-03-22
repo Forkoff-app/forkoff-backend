@@ -196,6 +196,22 @@ export class WebsocketGateway
     } catch (error) {
       this.logger.error(`Failed to load cloud pairings from DB: ${error instanceof Error ? error.message : String(error)}`);
     }
+
+    // Mark all devices as OFFLINE on startup — no sockets exist yet,
+    // so any ONLINE status in DB is stale from before the restart.
+    // This prevents duplicate offline notifications when stale devices
+    // are detected as "newly disconnected" during the first connection cycle.
+    try {
+      const { count } = await this.prisma.device.updateMany({
+        where: { status: DeviceStatus.ONLINE },
+        data: { status: DeviceStatus.OFFLINE },
+      });
+      if (count > 0) {
+        this.logger.log(`Startup: marked ${count} stale device(s) as OFFLINE`);
+      }
+    } catch (error) {
+      this.logger.error(`Failed to reset device statuses on startup: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   @WebSocketServer()
