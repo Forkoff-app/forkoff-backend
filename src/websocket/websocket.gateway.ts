@@ -860,7 +860,8 @@ export class WebsocketGateway
     }
 
     // Handle device disconnection — use grace period to tolerate brief network blips
-    if (client.deviceId) {
+    // Skip for session-scoped connections — they don't represent the device going offline
+    if (client.deviceId && client.clientType !== 'session-scoped') {
       const disconnectedDeviceId = client.deviceId;
       const disconnectedCliVersion = client.cliVersion;
 
