@@ -228,10 +228,8 @@ export class WebsocketGateway
   // Track sessions we've already requested name backfill for (avoid repeats)
   private nameBackfillRequested = new Set<string>();
 
-  // Cooldown for offline push notifications: deviceId -> last notification timestamp
-  // Prevents notification spam from reconnect cycles
-  private static readonly OFFLINE_PUSH_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
-  private offlinePushCooldowns = new Map<string, number>();
+  // Track devices that have been notified as offline — only notify again after they come back ONLINE
+  private offlineNotified = new Set<string>();
 
   // Track connected clients
   private userConnections = new Map<string, Set<string>>(); // userId -> Set of socket IDs
@@ -353,6 +351,7 @@ export class WebsocketGateway
         this.deviceConnections.set(deviceId, client.id);
         // Cancel any pending grace-period disconnect timer
         this.cancelGraceTimer(deviceId);
+        this.offlineNotified.delete(deviceId);
       }
       if (client.userId) {
         if (!this.userConnections.has(client.userId)) {
@@ -453,6 +452,7 @@ export class WebsocketGateway
         this.cliClientSockets.set(cliDeviceId, client);
         this.deviceConnections.set(cliDeviceId, client.id);
         this.cancelGraceTimer(cliDeviceId);
+        this.offlineNotified.delete(cliDeviceId);
 
         // Join device room so events addressed to this device reach the CLI
         client.join(`device:${cliDeviceId}`);
@@ -599,6 +599,7 @@ export class WebsocketGateway
         if (deviceId) {
           this.deviceConnections.set(deviceId, client.id);
           this.cancelGraceTimer(deviceId); // Cancel pending offline transition from previous disconnect
+          this.offlineNotified.delete(deviceId);
 
           // Get device metadata from handshake headers
           const deviceName = client.handshake.headers['x-device-name'] as string || 'CLI Device';
@@ -727,6 +728,7 @@ export class WebsocketGateway
         client.isDevice = true;
         this.deviceConnections.set(deviceId, client.id);
         this.cancelGraceTimer(deviceId); // Cancel pending offline transition from previous disconnect
+        this.offlineNotified.delete(deviceId);
 
         // Join device room
         client.join(`device:${deviceId}`);
@@ -931,13 +933,10 @@ export class WebsocketGateway
               cliVersion: disconnectedCliVersion,
             });
 
-            // Send push notification only if:
-            // 1. Device was previously online (not already offline from server restart)
-            // 2. Cooldown has elapsed (prevents spam from reconnect cycles)
-            const lastPush = this.offlinePushCooldowns.get(disconnectedDeviceId) || 0;
-            const cooldownElapsed = Date.now() - lastPush > WebsocketGateway.OFFLINE_PUSH_COOLDOWN_MS;
-            if (!wasAlreadyOffline && cooldownElapsed) {
-              this.offlinePushCooldowns.set(disconnectedDeviceId, Date.now());
+            // Send push notification only once per offline transition:
+            // Skip if device was already offline in DB, or if we already notified for this offline period
+            if (!wasAlreadyOffline && !this.offlineNotified.has(disconnectedDeviceId)) {
+              this.offlineNotified.add(disconnectedDeviceId);
               this.notificationsService
                 .sendPushToUser(
                   device.userId,
