@@ -228,6 +228,11 @@ export class WebsocketGateway
   // Track sessions we've already requested name backfill for (avoid repeats)
   private nameBackfillRequested = new Set<string>();
 
+  // Cooldown for offline push notifications: deviceId -> last notification timestamp
+  // Prevents notification spam from reconnect cycles
+  private static readonly OFFLINE_PUSH_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+  private offlinePushCooldowns = new Map<string, number>();
+
   // Track connected clients
   private userConnections = new Map<string, Set<string>>(); // userId -> Set of socket IDs
   private deviceConnections = new Map<string, string>(); // deviceId -> socket ID
@@ -926,9 +931,13 @@ export class WebsocketGateway
               cliVersion: disconnectedCliVersion,
             });
 
-            // Send push notification only if device was previously online
-            // (prevents duplicate notifications on server restart / reconnect cycles)
-            if (!wasAlreadyOffline) {
+            // Send push notification only if:
+            // 1. Device was previously online (not already offline from server restart)
+            // 2. Cooldown has elapsed (prevents spam from reconnect cycles)
+            const lastPush = this.offlinePushCooldowns.get(disconnectedDeviceId) || 0;
+            const cooldownElapsed = Date.now() - lastPush > WebsocketGateway.OFFLINE_PUSH_COOLDOWN_MS;
+            if (!wasAlreadyOffline && cooldownElapsed) {
+              this.offlinePushCooldowns.set(disconnectedDeviceId, Date.now());
               this.notificationsService
                 .sendPushToUser(
                   device.userId,
