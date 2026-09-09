@@ -290,6 +290,48 @@ model DeviceFingerprint {
   @@map("device_fingerprints")
 }
 
+model ClaudeAccount {
+  id                  String        @id @default(uuid())
+  name                String        @unique
+  encryptedOauthToken String
+  inviteCode          String?       @unique
+  disabled            Boolean       @default(false)
+  lastUsedAt          DateTime?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  users               GatewayUser[]
+
+  @@map("claude_accounts")
+}
+
+model GatewayUser {
+  id              String        @id @default(uuid())
+  username        String        @unique
+  passwordHash    String
+  claudeAccountId String
+  disabled        Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  claudeAccount   ClaudeAccount @relation(fields: [claudeAccountId], references: [id])
+  keys            GatewayKey[]
+
+  @@map("gateway_users")
+}
+
+model GatewayKey {
+  id         String      @id @default(uuid())
+  userId     String
+  hashedKey  String      @unique
+  label      String?
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime    @default(now())
+  user       GatewayUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("gateway_keys")
+}
+
 // Cloud relay pairing persistence (survives server restarts)
 model CloudPairing {
   id               String   @id @default(uuid())

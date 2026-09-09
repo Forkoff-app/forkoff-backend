@@ -3,10 +3,13 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { WinstonModule } from 'nest-winston';
+import { json, urlencoded } from 'express';
 import { AppModule } from './app.module';
 import { loadSecrets } from './config/secrets';
 import { winstonConfig } from './logging/winston.config';
 import { AllExceptionsFilter } from './logging/all-exceptions.filter';
+import { GatewayAuthService } from './gateway/gateway-auth.service';
+import { createGatewayProxy } from './gateway/gateway-proxy';
 
 // Store server reference for graceful shutdown
 let server: any;
@@ -18,9 +21,17 @@ async function bootstrap() {
   await loadSecrets();
 
   const app = await NestFactory.create(AppModule, {
-    rawBody: true,
+    bodyParser: false,
     logger: WinstonModule.createLogger(winstonConfig),
   });
+
+  if (process.env.GATEWAY_ENABLED === 'true') {
+    app.use('/gw', createGatewayProxy(app.get(GatewayAuthService)));
+    logger.log('Claude gateway proxy mounted at /gw');
+  }
+
+  app.use(json({ limit: '10mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
+  app.use(urlencoded({ extended: true, limit: '10mb' }));
 
   // Register global exception filter
   app.useGlobalFilters(new AllExceptionsFilter());
