@@ -40,6 +40,37 @@ npx ts-node scripts/gateway-admin.ts list
 
 Accounts with an invite code accept self-signup via `POST /api/gateway/auth/signup` (or `forkoff remote signup`). Tokens expire yearly — rerun `claude setup-token` and `rotate-token`.
 
+## Adding more accounts
+
+Each Claude subscription (Pro/Max) becomes one gateway account with its own token and invite code:
+
+1. Log in to Claude Code as that account (any machine) and run `claude setup-token` — complete the browser OAuth, copy the `sk-ant-oat...` token.
+2. `gateway-admin add-account --name <name> --token <sk-ant-oat...> --invite-code <unique-code>`
+3. Map users to it: signups with that invite code land on that account automatically, or move existing users with `gateway-admin map-user --username <u> --account <name>`.
+
+Users on the same account share its rate limits, so spreading users across accounts spreads capacity. `gateway-admin list` shows per-account `lastUsedAt` for a quick view of which accounts are in use.
+
+## Secure token rotation (token never touches disk or logs)
+
+For entering a real token without it landing in shell history, files, SSM command history, or any transcript, use an interactive SSM session and the bundled helper (`scripts/rotate-token.js` — edit the account name inside if not `main`):
+
+1. Stage the helper into the running app container (the helper contains no secrets):
+   ```bash
+   aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
+     --parameters '{"commands":["docker cp /path/to/rotate-token.js forkoff-app:/app/rotate-token.js"]}'
+   ```
+2. Open an interactive session (encrypted, not persisted to command history):
+   ```bash
+   aws ssm start-session --target <instance-id> --region us-east-1
+   ```
+3. Inside the session, run the helper and paste the token at the prompt:
+   ```bash
+   sudo docker exec -it forkoff-app node /app/rotate-token.js
+   ```
+4. Delete the helper afterwards: `sudo docker exec forkoff-app rm /app/rotate-token.js`
+
+The token travels clipboard → SSM TLS channel → AES-256-GCM → database, and nowhere else.
+
 ## Endpoints
 
 | Endpoint | Purpose |
