@@ -6,7 +6,7 @@ Each release is tagged `v<version>` in git.
 
 ## [Unreleased]
 
-## [1.1.0] - 2026-09-09
+## [1.1.0] - 2026-09-10
 
 ### Added
 - Self-hosted Claude gateway (dormant unless `GATEWAY_ENABLED=true` + `GATEWAY_TOKEN_ENC_KEY` set in secrets):
