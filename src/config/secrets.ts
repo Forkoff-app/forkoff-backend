@@ -16,6 +16,8 @@ interface SecretPayload {
   PAIRING_CODE_EXPIRY_MINUTES?: string;
   ADMIN_EMAILS?: string;
   ALLOWED_ORIGINS?: string;
+  GATEWAY_ENABLED?: string;
+  GATEWAY_TOKEN_ENC_KEY?: string;
 }
 
 const SECRET_NAME = process.env.SECRETS_MANAGER_NAME || 'forkoff-api';

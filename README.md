@@ -27,6 +27,7 @@
 - 📊 **Analytics & Tracking** - Token usage, session history, achievements
 - 🔔 **Push Notifications** - Expo push notifications for mobile alerts
 - ⏰ **Prompt Queue** - Queue and schedule prompts during rate limits
+- 🌐 **Self-Hosted Claude Gateway** - Route Claude Code through your own server with per-user credential injection ([docs](docs/GATEWAY.md))
 
 ---
 

@@ -18,6 +18,7 @@ import { AchievementsModule } from './achievements/achievements.module';
 import { PromptQueueModule } from './prompt-queue/prompt-queue.module';
 import { HealthModule } from './health/health.module';
 import { CryptoModule } from './crypto/crypto.module';
+import { GatewayModule } from './gateway/gateway.module';
 
 @Module({
   providers: [
@@ -70,6 +71,7 @@ import { CryptoModule } from './crypto/crypto.module';
     AchievementsModule,
     PromptQueueModule,
     CryptoModule,
+    GatewayModule,
 
     // WebSocket
     WebsocketModule,
